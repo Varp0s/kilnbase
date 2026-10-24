@@ -1,0 +1,180 @@
+import { type Result, fail, isError, ok, request, toError } from "./http.js";
+
+export interface User {
+  id: string;
+  email: string;
+  created_at: string;
+  last_sign_in_at: string | null;
+}
+
+export interface Session {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  /** Unix seconds. */
+  expires_at: number;
+  user: User;
+}
+
+export interface Credentials {
+  email: string;
+  password: string;
+}
+
+/** Anything shaped like `localStorage`; may be async. */
+export interface StorageAdapter {
+  getItem(key: string): string | null | Promise<string | null>;
+  setItem(key: string, value: string): void | Promise<void>;
+  removeItem(key: string): void | Promise<void>;
+}
+
+export type AuthEvent = "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFRESHED";
+export type AuthListener = (event: AuthEvent, session: Session | null) => void;
+
+/** Refresh this many seconds before expiry so in-flight requests never carry a dead token. */
+const REFRESH_MARGIN = 60;
+
+const now = () => Math.floor(Date.now() / 1000);
+
+export class AuthClient {
+  #session: Session | null = null;
+  #loaded = false;
+  #refreshing: Promise<Result<Session>> | null = null;
+  #listeners = new Set<AuthListener>();
+
+  constructor(
+    private readonly url: string,
+    private readonly apiKey: string,
+    private readonly storage: StorageAdapter | null,
+    private readonly storageKey: string,
+  ) {}
+
+  signUp(credentials: Credentials): Promise<Result<Session>> {
+    return this.#obtain("/auth/v1/signup", credentials, "SIGNED_IN");
+  }
+
+  signInWithPassword(credentials: Credentials): Promise<Result<Session>> {
+    return this.#obtain("/auth/v1/token?grant_type=password", credentials, "SIGNED_IN");
+  }
+
+  /** Ends the session on the server too, so its refresh token stops working everywhere. */
+  async signOut(): Promise<Result<null>> {
+    const session = await this.#current();
+    if (session) {
+      await request(`${this.url}/auth/v1/logout`, {
+        method: "POST",
+        headers: { apikey: this.apiKey, Authorization: `Bearer ${session.access_token}` },
+      });
+    }
+    await this.#set(null, "SIGNED_OUT");
+    return ok(null);
+  }
+
+  /** The current session, refreshed first if it is about to expire. */
+  async getSession(): Promise<Session | null> {
+    const session = await this.#current();
+    if (session && session.expires_at - REFRESH_MARGIN <= now()) {
+      const refreshed = await this.refreshSession();
+      return refreshed.data;
+    }
+    return session;
+  }
+
+  async getUser(): Promise<Result<User>> {
+    const session = await this.getSession();
+    if (!session) return fail(401, "not_signed_in", "no active session");
+    const res = await request(`${this.url}/auth/v1/user`, {
+      headers: { apikey: this.apiKey, Authorization: `Bearer ${session.access_token}` },
+    });
+    if (isError(res)) return { data: null, error: res };
+    return res.ok ? ok((await res.json()) as User) : toError(res);
+  }
+
+  /**
+   * Refresh tokens are single-use and replaying one ends the session, so concurrent refreshes are
+   * collapsed into one — within this client, and across tabs via the Web Locks API when present.
+   */
+  refreshSession(): Promise<Result<Session>> {
+    const seen = this.#session?.refresh_token;
+    this.#refreshing ??= this.#withLock(() => this.#refresh(seen)).finally(() => {
+      this.#refreshing = null;
+    });
+    return this.#refreshing;
+  }
+
+  onAuthStateChange(listener: AuthListener): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  /** @internal Token for outgoing requests; null means "use the API key". */
+  async accessToken(): Promise<string | null> {
+    return (await this.getSession())?.access_token ?? null;
+  }
+
+  async #refresh(seen: string | undefined): Promise<Result<Session>> {
+    // Another tab may have rotated the token while we waited for the lock; reuse its result
+    // instead of replaying a token that is already spent.
+    this.#loaded = false;
+    const session = await this.#current();
+    if (!session) return fail(401, "not_signed_in", "no active session");
+    if (seen !== undefined && session.refresh_token !== seen) return ok(session);
+
+    const res = await request(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: this.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: session.refresh_token }),
+    });
+    if (isError(res)) return { data: null, error: res };
+    if (!res.ok) {
+      const error = await toError<Session>(res);
+      if (res.status === 401) await this.#set(null, "SIGNED_OUT");
+      return error;
+    }
+    const fresh = (await res.json()) as Session;
+    await this.#set(fresh, "TOKEN_REFRESHED");
+    return ok(fresh);
+  }
+
+  async #obtain(path: string, credentials: Credentials, event: AuthEvent): Promise<Result<Session>> {
+    const res = await request(`${this.url}${path}`, {
+      method: "POST",
+      headers: { apikey: this.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    if (isError(res)) return { data: null, error: res };
+    if (!res.ok) return toError(res);
+    const session = (await res.json()) as Session;
+    await this.#set(session, event);
+    return ok(session);
+  }
+
+  async #current(): Promise<Session | null> {
+    if (!this.#loaded && this.storage) {
+      const raw = await this.storage.getItem(this.storageKey);
+      try {
+        this.#session = raw ? (JSON.parse(raw) as Session) : null;
+      } catch {
+        this.#session = null;
+      }
+    }
+    this.#loaded = true;
+    return this.#session;
+  }
+
+  async #set(session: Session | null, event: AuthEvent): Promise<void> {
+    this.#session = session;
+    this.#loaded = true;
+    if (this.storage) {
+      if (session) await this.storage.setItem(this.storageKey, JSON.stringify(session));
+      else await this.storage.removeItem(this.storageKey);
+    }
+    for (const listener of this.#listeners) listener(event, session);
+  }
+
+  #withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const locks = (globalThis.navigator as { locks?: LockManager } | undefined)?.locks;
+    return locks ? locks.request(`${this.storageKey}:refresh`, fn) : fn();
+  }
+}

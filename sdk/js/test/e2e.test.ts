@@ -1,0 +1,179 @@
+// End-to-end against a running stack: `docker compose up` at the repo root, then `npm run test:e2e`.
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { before, test } from "node:test";
+import { randomUUID } from "node:crypto";
+
+import { createClient } from "../dist/index.js";
+
+const ROOT = new URL("../../../", import.meta.url);
+const URL_ = process.env.KILNBASE_URL ?? "http://localhost:8000";
+const env = Object.fromEntries(
+  readFileSync(new URL(".env", ROOT), "utf8")
+    .split("\n")
+    .filter((l) => l && !l.startsWith("#"))
+    .map((l) => {
+      const i = l.indexOf("=");
+      return [l.slice(0, i), l.slice(i + 1).replace(/^'|'$/g, "")];
+    }),
+);
+const ANON = env.KILNBASE_ANON_KEY as string;
+const SERVICE = env.KILNBASE_SERVICE_ROLE_KEY as string;
+
+const client = () => createClient(URL_, ANON, { storage: null });
+const credentials = () => ({ email: `sdk-${randomUUID().slice(0, 8)}@example.com`, password: "a long passphrase" });
+
+before(async () => {
+  execFileSync("docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1"], {
+    cwd: ROOT,
+    input: `
+      drop table if exists public.e2e_sdk;
+      create table public.e2e_sdk (
+        id bigint generated always as identity primary key,
+        owner uuid not null default auth.uid(),
+        title text not null
+      );
+      alter table public.e2e_sdk enable row level security;
+      create policy own_sdk on public.e2e_sdk for all to authenticated
+        using (owner = auth.uid()) with check (owner = auth.uid());
+      select kilnbase.enable_realtime('public.e2e_sdk');
+      drop policy if exists e2e_sdk_files on storage.objects;
+      create policy e2e_sdk_files on storage.objects for all to authenticated
+        using (bucket_id = 'e2e-sdk' and owner = auth.uid())
+        with check (bucket_id = 'e2e-sdk' and owner = auth.uid());
+      delete from storage.objects where bucket_id = 'e2e-sdk';
+      delete from storage.buckets where id = 'e2e-sdk';
+      insert into storage.buckets (id) values ('e2e-sdk');
+      notify pgrst, 'reload schema';
+    `,
+  });
+  // Wait for PostgREST to reload its schema cache.
+  for (let i = 0; i < 50; i++) {
+    const res = await fetch(`${URL_}/rest/v1/e2e_sdk`, { headers: { apikey: SERVICE } });
+    if (res.ok) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error("e2e_sdk never appeared");
+});
+
+test("auth + REST respect row level security", async () => {
+  const a = client();
+  const b = client();
+  const signedUp = await a.auth.signUp(credentials());
+  assert.equal(signedUp.error, null);
+  await b.auth.signUp(credentials());
+
+  const inserted = await a.from<{ id: number; title: string; owner: string }>("e2e_sdk").insert({ title: "mine" });
+  assert.equal(inserted.error, null);
+  assert.equal(inserted.data?.[0]?.owner, signedUp.data?.user.id);
+
+  const mine = await a.from("e2e_sdk").select().eq("title", "mine");
+  assert.equal(mine.data?.length, 1);
+  const theirs = await b.from("e2e_sdk").select();
+  assert.deepEqual(theirs.data, []);
+
+  const one = await a.from("e2e_sdk").select("title").eq("title", "mine").single();
+  assert.deepEqual(one.data, { title: "mine" });
+});
+
+test("errors are returned, not thrown", async () => {
+  const c = client();
+  const bad = await c.auth.signInWithPassword({ email: "nobody@example.com", password: "wrong password" });
+  assert.equal(bad.data, null);
+  assert.equal(bad.error?.code, "invalid_credentials");
+  const missing = await c.from("no_such_table").select();
+  assert.equal(missing.data, null);
+  assert.ok(missing.error);
+});
+
+test("concurrent refreshes collapse into one rotation", async () => {
+  const c = client();
+  const first = (await c.auth.signUp(credentials())).data!;
+  const results = await Promise.all([c.auth.refreshSession(), c.auth.refreshSession(), c.auth.refreshSession()]);
+  for (const r of results) assert.equal(r.error, null);
+  const rotated = results.map((r) => r.data!.refresh_token);
+  assert.notEqual(rotated[0], first.refresh_token);
+  assert.equal(new Set(rotated).size, 1);
+  // Session would have been revoked if the same refresh token had been sent twice.
+  const user = await c.auth.getUser();
+  assert.equal(user.error, null);
+});
+
+test("two clients sharing storage do not replay a spent refresh token", async () => {
+  // Simulates two tabs over one localStorage.
+  const shared = new Map<string, string>();
+  const storage = {
+    getItem: (k: string) => shared.get(k) ?? null,
+    setItem: (k: string, v: string) => void shared.set(k, v),
+    removeItem: (k: string) => void shared.delete(k),
+  };
+  const tab1 = createClient(URL_, ANON, { storage });
+  const tab2 = createClient(URL_, ANON, { storage });
+  await tab1.auth.signUp(credentials());
+  assert.equal((await tab2.auth.getUser()).error, null);
+  assert.equal((await tab1.auth.refreshSession()).error, null);
+  // tab2 still holds the old token in memory, but re-reads storage before refreshing.
+  assert.equal((await tab2.auth.refreshSession()).error, null);
+  assert.equal((await tab1.auth.getUser()).error, null);
+});
+
+test("sign out ends the session", async () => {
+  const c = client();
+  const events: string[] = [];
+  c.auth.onAuthStateChange((e) => events.push(e));
+  await c.auth.signUp(credentials());
+  await c.auth.signOut();
+  assert.deepEqual(events, ["SIGNED_IN", "SIGNED_OUT"]);
+  assert.equal((await c.auth.getUser()).error?.code, "not_signed_in");
+});
+
+test("storage round trip and signed URLs", async () => {
+  const c = client();
+  await c.auth.signUp(credentials());
+  const bucket = c.storage.from("e2e-sdk");
+  const path = `notes/${randomUUID()}.txt`;
+
+  const up = await bucket.upload(path, "hello sdk", { contentType: "text/plain" });
+  assert.equal(up.error, null);
+  assert.equal(up.data?.size, 9);
+  assert.equal((await bucket.upload(path, "again")).error?.code, "already_exists");
+  assert.equal((await bucket.upload(path, "replaced", { upsert: true })).error, null);
+
+  const down = await bucket.download(path);
+  assert.equal(await down.data?.text(), "replaced");
+
+  const signed = await bucket.createSignedUrl(path, 60);
+  assert.equal(await (await fetch(signed.data!.signedUrl)).text(), "replaced");
+
+  assert.equal((await bucket.remove(path)).error, null);
+  assert.equal((await bucket.download(path)).error?.status, 404);
+});
+
+test("realtime delivers own inserts only", async () => {
+  const a = client();
+  const b = client();
+  await a.auth.signUp(credentials());
+  await b.auth.signUp(credentials());
+
+  const seenByA: unknown[] = [];
+  const seenByB: unknown[] = [];
+  const ready = (c: ReturnType<typeof client>, sink: unknown[]) =>
+    new Promise<() => void>((resolve, reject) => {
+      const stop = c.realtime.subscribe("e2e_sdk", (e) => sink.push(e), reject);
+      // The server confirms asynchronously; give it a moment before writing.
+      setTimeout(() => resolve(stop), 500);
+    });
+  const stopA = await ready(a, seenByA);
+  const stopB = await ready(b, seenByB);
+
+  await a.from("e2e_sdk").insert({ title: "live" });
+  for (let i = 0; i < 50 && seenByA.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 500));
+  stopA();
+  stopB();
+
+  assert.equal(seenByA.length, 1);
+  assert.equal((seenByA[0] as { record: { title: string } }).record.title, "live");
+  assert.deepEqual(seenByB, []);
+});

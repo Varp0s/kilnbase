@@ -1,0 +1,22 @@
+{
+  "name": "kilnbase",
+  "version": "0.0.0",
+  "description": "Client for Kilnbase: auth, REST, storage and realtime",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/Varp0s/kilnbase.git", "directory": "sdk/js" },
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node --test test/unit.test.ts",
+    "test:e2e": "npm run build && node --test test/e2e.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

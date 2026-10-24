@@ -41,9 +41,24 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pytest -q
 
+  sdk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/js
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sdk/js/package-lock.json
+      - run: npm ci
+      - run: npm test
+
   smoke:
     runs-on: ubuntu-latest
-    needs: [rust, python]
+    needs: [rust, python, sdk]
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@v10.3.2
@@ -57,6 +72,12 @@ jobs:
         env:
           KILNBASE_E2E: "1"
         run: uv run pytest tests/e2e -q
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+      - name: SDK end-to-end tests
+        working-directory: sdk/js
+        run: npm ci && npm run test:e2e
       - name: services refuse example secrets
         run: |
           for img in kilnbase-core kilnbase-auth; do

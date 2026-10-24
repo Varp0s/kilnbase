@@ -213,30 +213,45 @@ async fn handle_client(
             json!({ "type": "unsubscribed", "id": id })
         }
         ClientMessage::Subscribe { id, table } => {
-            if subs.len() >= MAX_SUBSCRIPTIONS && !subs.contains_key(&id) {
-                return error("too_many_subscriptions", "limit is 100 per connection");
-            }
-            if id.is_empty() || id.len() > 128 {
-                return error(
-                    "invalid_message",
-                    "subscription id must be 1-128 characters",
-                );
-            }
-            match can_subscribe(pool, caller, &table).await {
-                Ok(Access::Allowed) => {
-                    subs.insert(id.clone(), table.clone());
-                    json!({ "type": "subscribed", "id": id, "table": table })
-                }
-                Ok(Access::Denied) => error("forbidden", "table not found or not readable"),
-                Ok(Access::NotEnabled) => error(
-                    "realtime_not_enabled",
-                    "run select kilnbase.enable_realtime('public.<table>') first",
-                ),
-                Err(e) => {
-                    eprintln!("kilnbase-core: realtime subscribe check failed: {e:?}");
-                    error("internal", "internal error")
-                }
-            }
+            let mut reply = subscribe(pool, caller, subs, &id, &table).await;
+            // Echo the id on errors too, so clients can tell which subscription failed.
+            reply["id"] = Value::String(id);
+            reply
+        }
+    }
+}
+
+async fn subscribe(
+    pool: &Pool,
+    caller: &Caller,
+    subs: &mut HashMap<String, String>,
+    id: &str,
+    table: &str,
+) -> Value {
+    let error =
+        |code: &str, message: &str| json!({ "type": "error", "code": code, "message": message });
+    if subs.len() >= MAX_SUBSCRIPTIONS && !subs.contains_key(id) {
+        return error("too_many_subscriptions", "limit is 100 per connection");
+    }
+    if id.is_empty() || id.len() > 128 {
+        return error(
+            "invalid_message",
+            "subscription id must be 1-128 characters",
+        );
+    }
+    match can_subscribe(pool, caller, table).await {
+        Ok(Access::Allowed) => {
+            subs.insert(id.to_owned(), table.to_owned());
+            json!({ "type": "subscribed", "table": table })
+        }
+        Ok(Access::Denied) => error("forbidden", "table not found or not readable"),
+        Ok(Access::NotEnabled) => error(
+            "realtime_not_enabled",
+            "run select kilnbase.enable_realtime('public.<table>') first",
+        ),
+        Err(e) => {
+            eprintln!("kilnbase-core: realtime subscribe check failed: {e:?}");
+            error("internal", "internal error")
         }
     }
 }

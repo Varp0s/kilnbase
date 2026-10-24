@@ -16,6 +16,27 @@ curl localhost:8000/health
 
 `kilnbase init` refuses to overwrite an existing `.env`, and every service refuses to start with missing or example secrets.
 
+### JavaScript / TypeScript client
+
+```js
+import { createClient } from "kilnbase";
+
+const kb = createClient("http://localhost:8000", ANON_KEY);
+
+await kb.auth.signUp({ email: "ada@example.com", password: "a long passphrase" });
+
+const { data, error } = await kb.from("todos").select().eq("done", false).order("id");
+await kb.from("todos").insert({ title: "write docs" });
+
+await kb.storage.from("avatars").upload("ada/me.png", file, { upsert: true });
+
+const stop = kb.realtime.subscribe("todos", (change) => console.log(change.op, change));
+```
+
+Calls resolve to `{ data, error }` and never throw on HTTP errors. Sessions refresh themselves before they
+expire, and concurrent refreshes — including from other tabs — are collapsed so a refresh token is never
+replayed. The package has no runtime dependencies.
+
 ### REST API
 
 Every table in `public` is served at `/rest/v1/<table>`, but **only while row level security protects it** —
@@ -116,6 +137,7 @@ API keys are ES256 JWTs. `KILNBASE_ANON_KEY` is safe for clients; `KILNBASE_SERV
 uv sync && uv run pytest              # Python unit tests (auth, cli)
 KILNBASE_E2E=1 uv run pytest tests/e2e  # end-to-end, needs the stack running
 cd core && cargo test                 # Rust (core)
+cd sdk/js && npm ci && npm test       # SDK unit tests; npm run test:e2e needs the stack
 ```
 
 ## License
