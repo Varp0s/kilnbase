@@ -1,0 +1,20 @@
+[package]
+name = "kilnbase-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "kilnbase-core"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "http2", "tokio", "json"] }
+serde_json = "1.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[lints]
+workspace = true

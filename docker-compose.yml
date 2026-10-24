@@ -1,0 +1,47 @@
+name: kilnbase
+
+services:
+  db:
+    image: postgres:18.6-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run `kilnbase init` first}
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 10
+
+  auth:
+    build:
+      context: .
+      dockerfile: auth/Dockerfile
+    image: ghcr.io/varp0s/kilnbase-auth:dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      KILNBASE_JWT_PRIVATE_JWK: ${KILNBASE_JWT_PRIVATE_JWK:?run `kilnbase init` first}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  core:
+    build: ./core
+    image: ghcr.io/varp0s/kilnbase-core:dev
+    restart: unless-stopped
+    environment:
+      KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
+    ports:
+      - "8000:8000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      - auth
+
+volumes:
+  db-data:

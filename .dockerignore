@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!uv.lock
+!auth/pyproject.toml
+!auth/src/
+!cli/pyproject.toml
+**/__pycache__

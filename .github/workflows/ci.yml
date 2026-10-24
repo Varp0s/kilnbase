@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: core
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          manifest-path: core/Cargo.toml
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: [rust, python]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: uv run kilnbase init
+      - run: docker compose up -d --build --wait
+      - name: health checks
+        run: |
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 2 localhost:8000/health
+          docker compose exec -T auth python -c "import urllib.request; urllib.request.urlopen('http://localhost:9999/health')"
+      - name: services refuse example secrets
+        run: |
+          for img in kilnbase-core kilnbase-auth; do
+            if docker run --rm --env-file .env.example ghcr.io/varp0s/$img:dev; then
+              echo "$img started with example secrets"; exit 1
+            fi
+          done
+      - if: failure()
+        run: docker compose logs
