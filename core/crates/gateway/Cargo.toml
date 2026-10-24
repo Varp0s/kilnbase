@@ -31,5 +31,6 @@ uuid = { version = "1.29.0", features = ["v4"] }
 workspace = true
 
 [dev-dependencies]
+proptest = "1.12.0"
 # PEM parsing is only needed to sign test tokens.
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }

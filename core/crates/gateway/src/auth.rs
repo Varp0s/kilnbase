@@ -207,4 +207,21 @@ mod tests {
         );
         assert!(authorize(&k, &headers(&forged, None)).is_err());
     }
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_tokens_are_never_accepted(api_key in r"\PC{0,300}", bearer in proptest::option::of(r"\PC{0,300}")) {
+            proptest::prop_assert!(authorize_tokens(&keys(), Some(&api_key), bearer.as_deref()).is_err());
+        }
+
+        #[test]
+        fn mangled_valid_tokens_are_rejected(pos in 0usize..400, byte in proptest::num::u8::ANY) {
+            let mut token = token("anon", 3600, "test").into_bytes();
+            let pos = pos % token.len();
+            proptest::prop_assume!(token[pos] != byte);
+            token[pos] = byte;
+            let token = String::from_utf8_lossy(&token).into_owned();
+            proptest::prop_assert!(authorize_tokens(&keys(), Some(&token), None).is_err());
+        }
+    }
 }

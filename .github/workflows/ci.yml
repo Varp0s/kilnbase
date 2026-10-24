@@ -78,6 +78,8 @@ jobs:
       - name: SDK end-to-end tests
         working-directory: sdk/js
         run: npm ci && npm run test:e2e
+      - name: release gate (shipped files, lock files, image filesystems)
+        run: scripts/release-gate.sh --images ghcr.io/varp0s/kilnbase-core:dev ghcr.io/varp0s/kilnbase-auth:dev
       - name: services refuse example secrets
         run: |
           for img in kilnbase-core kilnbase-auth; do

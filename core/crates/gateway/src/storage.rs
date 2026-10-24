@@ -546,4 +546,27 @@ mod tests {
         assert!(unhex("zz").is_none());
         assert_eq!(encode_path("a b/ğ?.txt"), "a%20b/%C4%9F%3F.txt");
     }
+
+    proptest::proptest! {
+        #[test]
+        fn accepted_names_never_traverse(name in r"\PC{0,64}|[a-z./\\]{0,16}") {
+            if valid_name(&name) {
+                proptest::prop_assert!(!name.starts_with('/'));
+                proptest::prop_assert!(name.split('/').all(|s| s != ".." && s != "." && !s.is_empty()));
+                proptest::prop_assert!(!name.contains('\\'));
+                proptest::prop_assert!(!name.chars().any(char::is_control));
+            }
+        }
+
+        #[test]
+        fn signature_decoding_never_panics(s in r"\PC{0,80}") {
+            let _ = unhex(&s);
+        }
+
+        #[test]
+        fn encoded_paths_only_contain_safe_bytes(name in r"\PC{0,64}") {
+            let encoded = encode_path(&name);
+            proptest::prop_assert!(encoded.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~/%".contains(&b)));
+        }
+    }
 }
