@@ -16,7 +16,7 @@ line-length = 100
 select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC"]
 
 [tool.ruff.lint.per-file-ignores]
-"*/tests/*" = ["S101"]
+"**/tests/**" = ["S101"]
 
 [tool.pytest.ini_options]
-testpaths = ["auth/tests", "cli/tests"]
+testpaths = ["auth/tests", "cli/tests", "tests/e2e"]

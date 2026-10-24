@@ -1,6 +1,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 # Value shipped in .env.example; refusing it stops people from running with published secrets.
@@ -15,6 +16,8 @@ class ConfigError(Exception):
 class Config:
     database_url: str
     private_jwk: dict
+    authenticator_password: str
+    migrations_dir: Path
     port: int
 
 
@@ -36,11 +39,20 @@ def load(env: Mapping[str, str]) -> Config:
     ):
         raise ConfigError("KILNBASE_JWT_PRIVATE_JWK must be a private EC P-256 JWK")
 
+    authenticator_password = _required(env, "KILNBASE_AUTHENTICATOR_PASSWORD")
+    migrations_dir = Path(env.get("KILNBASE_MIGRATIONS_DIR", "/app/migrations"))
+
     port_raw = env.get("KILNBASE_AUTH_PORT", "9999")
     if not port_raw.isdigit() or not 0 < int(port_raw) < 65536:
         raise ConfigError(f"KILNBASE_AUTH_PORT is not a valid port: {port_raw}")
 
-    return Config(database_url=database_url, private_jwk=jwk, port=int(port_raw))
+    return Config(
+        database_url=database_url,
+        private_jwk=jwk,
+        authenticator_password=authenticator_password,
+        migrations_dir=migrations_dir,
+        port=int(port_raw),
+    )
 
 
 def _required(env: Mapping[str, str], name: str) -> str:

@@ -53,6 +53,10 @@ jobs:
         run: |
           curl -fsS --retry 10 --retry-all-errors --retry-delay 2 localhost:8000/health
           docker compose exec -T auth python -c "import urllib.request; urllib.request.urlopen('http://localhost:9999/health')"
+      - name: end-to-end tests
+        env:
+          KILNBASE_E2E: "1"
+        run: uv run pytest tests/e2e -q
       - name: services refuse example secrets
         run: |
           for img in kilnbase-core kilnbase-auth; do

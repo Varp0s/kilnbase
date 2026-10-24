@@ -22,11 +22,32 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       KILNBASE_JWT_PRIVATE_JWK: ${KILNBASE_JWT_PRIVATE_JWK:?run `kilnbase init` first}
+      KILNBASE_AUTHENTICATOR_PASSWORD: ${KILNBASE_AUTHENTICATOR_PASSWORD:?run `kilnbase init` first}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9999/health')"]
+      interval: 5s
+      retries: 20
+    depends_on:
+      db:
+        condition: service_healthy
+
+  postgrest:
+    image: postgrest/postgrest:v16.5
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${KILNBASE_AUTHENTICATOR_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${KILNBASE_JWKS}
+      PGRST_OPENAPI_MODE: follow-privileges
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     depends_on:
-      db:
+      auth:
         condition: service_healthy
 
   core:
@@ -42,6 +63,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     depends_on:
       - auth
+      - postgrest
 
 volumes:
   db-data:

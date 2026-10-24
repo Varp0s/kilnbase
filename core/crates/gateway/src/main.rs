@@ -1,10 +1,26 @@
+mod auth;
 mod config;
+mod error;
+mod proxy;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use axum::{Json, Router, routing::get};
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{any, get};
+use axum::{Json, Router};
+use jsonwebtoken::DecodingKey;
 use serde_json::json;
+
+struct AppState {
+    keys: HashMap<String, DecodingKey>,
+    postgrest_url: String,
+    http: proxy::HttpClient,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -15,10 +31,17 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Parsed now so a bad key fails at boot; JWT verification uses it from Phase 1.
-    let _jwks = cfg.jwks;
 
-    let app = Router::new().route("/health", get(|| async { Json(json!({ "status": "ok" })) }));
+    let state = Arc::new(AppState {
+        keys: cfg.keys,
+        postgrest_url: cfg.postgrest_url,
+        http: proxy::client(),
+    });
+    let app = Router::new()
+        .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
+        .route("/rest/v1/", any(rest))
+        .route("/rest/v1/{*path}", any(rest))
+        .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -38,6 +61,27 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+async fn rest(State(st): State<Arc<AppState>>, mut req: Request) -> Response {
+    let token = match auth::authorize(&st.keys, req.headers()) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    // Verified JWTs are base64url + dots, so this cannot fail; handled anyway rather than unwrapped.
+    let Ok(bearer) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+        return error::ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "invalid token")
+            .into_response();
+    };
+    req.headers_mut().insert(header::AUTHORIZATION, bearer);
+    req.headers_mut().remove("apikey");
+
+    let path_and_query = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let upstream_path = path_and_query
+        .strip_prefix("/rest/v1")
+        .unwrap_or(path_and_query)
+        .to_owned();
+    proxy::forward(&st.http, &st.postgrest_url, &upstream_path, req).await
 }
 
 async fn shutdown_signal() {

@@ -4,6 +4,7 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBU
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY auth ./auth
+COPY migrations ./migrations
 # uv needs every workspace member's manifest to validate the lock file.
 COPY cli/pyproject.toml ./cli/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-auth \

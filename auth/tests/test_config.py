@@ -9,6 +9,7 @@ JWK = json.dumps({"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "d": "c"})
 VALID = {
     "DATABASE_URL": "postgres://postgres:s3cret@db:5432/postgres",
     "KILNBASE_JWT_PRIVATE_JWK": JWK,
+    "KILNBASE_AUTHENTICATOR_PASSWORD": "pw",
 }
 
 
@@ -25,6 +26,7 @@ def test_accepts_valid_config():
         {"KILNBASE_JWT_PRIVATE_JWK": PLACEHOLDER},
         {"KILNBASE_JWT_PRIVATE_JWK": "not json"},
         {"KILNBASE_JWT_PRIVATE_JWK": json.dumps({"kty": "EC", "crv": "P-256", "x": "a"})},
+        {"KILNBASE_AUTHENTICATOR_PASSWORD": PLACEHOLDER},
         {"KILNBASE_AUTH_PORT": "70000"},
     ],
 )

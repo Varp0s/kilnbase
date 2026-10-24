@@ -24,6 +24,7 @@ def generate_env() -> str:
     # Single-quoted so docker compose reads the JSON literally.
     values = {
         "POSTGRES_PASSWORD": secrets.token_urlsafe(32),
+        "KILNBASE_AUTHENTICATOR_PASSWORD": secrets.token_urlsafe(32),
         "KILNBASE_JWT_PRIVATE_JWK": f"'{json.dumps(private_jwk, separators=(',', ':'))}'",
         "KILNBASE_JWKS": f"'{json.dumps({'keys': [public_jwk]}, separators=(',', ':'))}'",
         "KILNBASE_ANON_KEY": api_key("anon"),
