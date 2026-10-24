@@ -14,11 +14,11 @@ pub struct Claims {
 const API_KEY_ROLES: &[&str] = &["anon", "service_role"];
 const REQUEST_ROLES: &[&str] = &["anon", "authenticated", "service_role"];
 
-/// Checks the `apikey` header and optional bearer token; returns the token to forward upstream.
-pub fn authorize(
+/// Checks that the `apikey` header holds a valid anon or service_role key; returns it.
+pub fn check_api_key<'a>(
     keys: &HashMap<String, DecodingKey>,
-    headers: &HeaderMap,
-) -> Result<String, ApiError> {
+    headers: &'a HeaderMap,
+) -> Result<&'a str, ApiError> {
     let api_key = headers
         .get("apikey")
         .and_then(|v| v.to_str().ok())
@@ -27,6 +27,15 @@ pub fn authorize(
     if !API_KEY_ROLES.contains(&api_claims.role.as_str()) {
         return Err(unauthorized("invalid apikey"));
     }
+    Ok(api_key)
+}
+
+/// Checks the `apikey` header and optional bearer token; returns the token to forward upstream.
+pub fn authorize(
+    keys: &HashMap<String, DecodingKey>,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let api_key = check_api_key(keys, headers)?;
 
     let Some(auth) = headers.get(header::AUTHORIZATION) else {
         return Ok(api_key.to_owned());

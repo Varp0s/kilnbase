@@ -38,6 +38,24 @@ curl localhost:8000/rest/v1/todos \
   -H "Authorization: Bearer <user access token>"
 ```
 
+### Auth
+
+```sh
+# sign up (or sign in with grant_type=password) — returns access_token + refresh_token
+curl -X POST localhost:8000/auth/v1/signup -H "apikey: $KILNBASE_ANON_KEY" \
+  -H "Content-Type: application/json" -d '{"email":"ada@example.com","password":"a long passphrase"}'
+
+curl -X POST "localhost:8000/auth/v1/token?grant_type=refresh_token" -H "apikey: $KILNBASE_ANON_KEY" \
+  -H "Content-Type: application/json" -d '{"refresh_token":"..."}'
+
+curl localhost:8000/auth/v1/user -H "apikey: $KILNBASE_ANON_KEY" -H "Authorization: Bearer <access_token>"
+curl -X POST localhost:8000/auth/v1/logout -H "apikey: $KILNBASE_ANON_KEY" -H "Authorization: Bearer <access_token>"
+```
+
+- Passwords are hashed with argon2id; access tokens are ES256 JWTs valid for one hour.
+- Refresh tokens are single-use. Presenting a used one again is treated as theft and ends the whole session.
+- Failed sign-ins are rate limited per email and per client IP.
+
 ## Architecture
 
 | Service | Language | Role |

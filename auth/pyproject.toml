@@ -5,8 +5,10 @@ description = "Kilnbase auth service"
 license = "Apache-2.0"
 requires-python = ">=3.15"
 dependencies = [
+    "argon2-cffi==25.1.0",
     "asyncpg==0.32.0",
     "fastapi==0.162.0",
+    "pyjwt[crypto]==2.15.1",
     "uvicorn[standard]==0.54.0",
 ]
 

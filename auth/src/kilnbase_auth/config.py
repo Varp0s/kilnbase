@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import jwt
+
 # Value shipped in .env.example; refusing it stops people from running with published secrets.
 PLACEHOLDER = "change-me"
 
@@ -36,8 +38,13 @@ def load(env: Mapping[str, str]) -> Config:
         and jwk.get("kty") == "EC"
         and jwk.get("crv") == "P-256"
         and jwk.get("d")
+        and jwk.get("kid")
     ):
-        raise ConfigError("KILNBASE_JWT_PRIVATE_JWK must be a private EC P-256 JWK")
+        raise ConfigError("KILNBASE_JWT_PRIVATE_JWK must be a private EC P-256 JWK with a kid")
+    try:
+        jwt.PyJWK.from_dict(jwk)
+    except (jwt.PyJWTError, ValueError) as e:
+        raise ConfigError(f"KILNBASE_JWT_PRIVATE_JWK is not a usable key: {e}") from e
 
     authenticator_password = _required(env, "KILNBASE_AUTHENTICATOR_PASSWORD")
     migrations_dir = Path(env.get("KILNBASE_MIGRATIONS_DIR", "/app/migrations"))

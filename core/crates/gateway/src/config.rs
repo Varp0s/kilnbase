@@ -9,6 +9,7 @@ pub const PLACEHOLDER: &str = "change-me";
 pub struct Config {
     pub port: u16,
     pub postgrest_url: String,
+    pub auth_url: String,
     /// Verification keys by `kid`; the gateway never holds a signing key.
     pub keys: HashMap<String, DecodingKey>,
 }
@@ -39,14 +40,19 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
             .parse()
             .map_err(|_| format!("KILNBASE_PORT is not a valid port: {p}"))?,
     };
-    let postgrest_url = get("KILNBASE_POSTGREST_URL")
-        .unwrap_or_else(|| "http://postgrest:3000".into())
-        .trim_end_matches('/')
-        .to_owned();
+    let upstream = |name: &str, default: &str| {
+        get(name)
+            .unwrap_or_else(|| default.into())
+            .trim_end_matches('/')
+            .to_owned()
+    };
+    let postgrest_url = upstream("KILNBASE_POSTGREST_URL", "http://postgrest:3000");
+    let auth_url = upstream("KILNBASE_AUTH_URL", "http://auth:9999");
 
     Ok(Config {
         port,
         postgrest_url,
+        auth_url,
         keys,
     })
 }

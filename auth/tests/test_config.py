@@ -1,11 +1,15 @@
 import json
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+from jwt.algorithms import ECAlgorithm
 from kilnbase_auth.app import create_app
 from kilnbase_auth.config import PLACEHOLDER, ConfigError, load
 
-JWK = json.dumps({"kty": "EC", "crv": "P-256", "x": "a", "y": "b", "d": "c"})
+JWK = json.dumps(
+    json.loads(ECAlgorithm.to_jwk(ec.generate_private_key(ec.SECP256R1()))) | {"kid": "k1"}
+)
 VALID = {
     "DATABASE_URL": "postgres://postgres:s3cret@db:5432/postgres",
     "KILNBASE_JWT_PRIVATE_JWK": JWK,
@@ -26,6 +30,12 @@ def test_accepts_valid_config():
         {"KILNBASE_JWT_PRIVATE_JWK": PLACEHOLDER},
         {"KILNBASE_JWT_PRIVATE_JWK": "not json"},
         {"KILNBASE_JWT_PRIVATE_JWK": json.dumps({"kty": "EC", "crv": "P-256", "x": "a"})},
+        {"KILNBASE_JWT_PRIVATE_JWK": json.dumps(json.loads(JWK) | {"d": "a"})},
+        {
+            "KILNBASE_JWT_PRIVATE_JWK": json.dumps(
+                {k: v for k, v in json.loads(JWK).items() if k != "kid"}
+            )
+        },
         {"KILNBASE_AUTHENTICATOR_PASSWORD": PLACEHOLDER},
         {"KILNBASE_AUTH_PORT": "70000"},
     ],
