@@ -25,7 +25,7 @@ k6 runs inside the compose network and sends the same PostgREST query (`10 rows,
 Gateway overhead at p99: **+0.10 ms** with an API key, **+0.41 ms** with a user token — inside the < 1 ms goal.
 Throughput across all scenarios: ~8,900 requests/s, 0 failures out of 621,110.
 
-Idle memory after the run: `core` ≈ 6 MB.
+Memory right after the run: `core` 9 MB, `auth` 53 MB, `db` 82 MB, `postgrest` 210 MB.
 
 These numbers come from a developer laptop and are only meaningful relative to each other; rerun on your own
 hardware before drawing conclusions.
