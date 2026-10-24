@@ -23,11 +23,11 @@ pub fn check_api_key(
     keys: &HashMap<String, DecodingKey>,
     headers: &HeaderMap,
 ) -> Result<Caller, ApiError> {
-    let api_key = headers
-        .get("apikey")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| unauthorized("missing apikey header"))?;
-    verify(keys, api_key, API_KEY_ROLES).map_err(|_| unauthorized("invalid apikey"))
+    authorize_tokens(
+        keys,
+        headers.get("apikey").and_then(|v| v.to_str().ok()),
+        None,
+    )
 }
 
 /// Checks the `apikey` header and optional bearer token; the bearer token, if any, wins.
@@ -35,17 +35,48 @@ pub fn authorize(
     keys: &HashMap<String, DecodingKey>,
     headers: &HeaderMap,
 ) -> Result<Caller, ApiError> {
-    let api_caller = check_api_key(keys, headers)?;
-
-    let Some(auth) = headers.get(header::AUTHORIZATION) else {
-        return Ok(api_caller);
+    let bearer = match headers.get(header::AUTHORIZATION) {
+        None => None,
+        Some(v) => Some(
+            v.to_str()
+                .ok()
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .ok_or_else(|| unauthorized("authorization header must be a bearer token"))?,
+        ),
     };
-    let token = auth
-        .to_str()
-        .ok()
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(|| unauthorized("authorization header must be a bearer token"))?;
-    verify(keys, token, REQUEST_ROLES)
+    authorize_tokens(
+        keys,
+        headers.get("apikey").and_then(|v| v.to_str().ok()),
+        bearer,
+    )
+}
+
+/// Same rules as `authorize` for callers that cannot send headers (browser WebSockets).
+pub fn authorize_tokens(
+    keys: &HashMap<String, DecodingKey>,
+    api_key: Option<&str>,
+    bearer: Option<&str>,
+) -> Result<Caller, ApiError> {
+    let api_key = api_key.ok_or_else(|| unauthorized("missing apikey"))?;
+    let api_caller =
+        verify(keys, api_key, API_KEY_ROLES).map_err(|_| unauthorized("invalid apikey"))?;
+    match bearer {
+        None => Ok(api_caller),
+        Some(token) => verify(keys, token, REQUEST_ROLES),
+    }
+}
+
+impl Caller {
+    /// True once the token's `exp` has passed; long-lived connections must re-check this.
+    pub fn expired(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.claims
+            .get("exp")
+            .and_then(Value::as_u64)
+            .is_none_or(|exp| exp < now)
+    }
 }
 
 fn verify(

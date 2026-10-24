@@ -84,6 +84,21 @@ create policy own_avatars on storage.objects for all to authenticated
 
 Uploads stream to disk with the size limit enforced while bytes arrive. Files are stored under their database ID, never under the client-supplied name, and are served with `nosniff` and a sandboxing CSP so uploaded HTML cannot run on your API's origin.
 
+### Realtime
+
+```sql
+select kilnbase.enable_realtime('public.todos');
+```
+
+```js
+const ws = new WebSocket(`ws://localhost:8000/realtime/v1/websocket?apikey=${anonKey}&access_token=${accessToken}`);
+ws.onopen = () => ws.send(JSON.stringify({ type: "subscribe", id: "todos", table: "todos" }));
+ws.onmessage = (e) => console.log(JSON.parse(e.data)); // {type:"change", op:"INSERT", record:{...}}
+```
+
+Every insert and update is re-read as the subscriber, so clients only receive rows their RLS policies allow.
+See [docs/realtime-protocol.md](docs/realtime-protocol.md).
+
 ## Architecture
 
 | Service | Language | Role |

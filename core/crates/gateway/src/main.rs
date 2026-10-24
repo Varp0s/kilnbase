@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod error;
 mod proxy;
+mod realtime;
 mod storage;
 
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ struct AppState {
     auth_url: String,
     http: proxy::HttpClient,
     storage: storage::Storage,
+    realtime: realtime::Hub,
 }
 
 #[tokio::main]
@@ -60,18 +62,23 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let hub = realtime::hub();
+    realtime::spawn_listener(cfg.database_url.clone(), hub.clone());
+
     let state = Arc::new(AppState {
         keys: cfg.keys,
         postgrest_url: cfg.postgrest_url,
         auth_url: cfg.auth_url,
         http: proxy::client(),
         storage,
+        realtime: hub,
     });
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/rest/v1/", any(rest))
         .route("/rest/v1/{*path}", any(rest))
         .route("/auth/v1/{*path}", any(auth_service))
+        .route("/realtime/v1/websocket", get(realtime::websocket))
         .route("/storage/v1/bucket", post(storage::create_bucket))
         .route(
             "/storage/v1/object/public/{bucket}/{*name}",
