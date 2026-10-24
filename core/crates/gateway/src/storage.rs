@@ -1,0 +1,549 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use aws_lc_rs::hmac;
+use axum::Json;
+use axum::body::Body;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use deadpool_postgres::Pool;
+use http_body_util::BodyExt;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
+
+use crate::AppState;
+use crate::auth::{self, Caller};
+use crate::db;
+use crate::error::ApiError;
+
+pub struct Storage {
+    pub pool: Pool,
+    pub dir: PathBuf,
+    pub max_file_size: u64,
+    pub signing_key: hmac::Key,
+}
+
+const MAX_SIGNED_URL_LIFETIME: u64 = 7 * 24 * 3600;
+
+impl Storage {
+    pub async fn prepare_dirs(&self) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(self.dir.join("tmp")).await?;
+        tokio::fs::create_dir_all(self.dir.join("objects")).await
+    }
+
+    fn object_path(&self, id: &str) -> PathBuf {
+        // Files are named by the database-generated UUID, never by the user-supplied name.
+        self.dir.join("objects").join(id)
+    }
+}
+
+/// Object names are `/`-separated paths; reject anything that could be read as traversal or
+/// smuggle control characters into logs and headers.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 1024
+        && !name.chars().any(|c| c.is_control() || c == '\\')
+        && name
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+fn bad_request(message: &'static str) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
+}
+
+fn not_found() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "not_found", "object not found")
+}
+
+fn too_large() -> ApiError {
+    ApiError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "payload_too_large",
+        "file exceeds the size limit",
+    )
+}
+
+/// `type/subtype` without parameters, lower-cased; `None` if malformed.
+fn mime_essence(headers: &HeaderMap) -> Option<String> {
+    let Some(raw) = headers.get(header::CONTENT_TYPE) else {
+        return Some("application/octet-stream".into());
+    };
+    let essence = raw
+        .to_str()
+        .ok()?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    let (kind, sub) = essence.split_once('/')?;
+    let token = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "!#$&-^_.+".contains(c))
+    };
+    (token(kind) && token(sub)).then_some(essence)
+}
+
+fn mime_allowed(mime: &str, allowed: Option<&[String]>) -> bool {
+    let Some(allowed) = allowed else { return true };
+    allowed
+        .iter()
+        .any(|pattern| match pattern.strip_suffix("/*") {
+            Some(prefix) => mime.split('/').next() == Some(prefix),
+            None => pattern == mime,
+        })
+}
+
+/// Deletes the file on drop unless `keep` is called; covers every early return during upload.
+struct TempFile(Option<PathBuf>);
+
+impl TempFile {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+struct BucketSettings {
+    file_size_limit: Option<i64>,
+    allowed_mime_types: Option<Vec<String>>,
+}
+
+async fn bucket_settings(pool: &Pool, bucket: &str) -> Result<BucketSettings, ApiError> {
+    let mut client = db::client(pool).await?;
+    let tx = db::begin_as_service(&mut client).await?;
+    let row = tx
+        .query_opt(
+            "select file_size_limit, allowed_mime_types from storage.buckets where id = $1",
+            &[&bucket],
+        )
+        .await
+        .map_err(db::internal)?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "bucket_not_found",
+                "bucket not found",
+            )
+        })?;
+    Ok(BucketSettings {
+        file_size_limit: row.get(0),
+        allowed_mime_types: row.get(1),
+    })
+}
+
+/// POST creates (409 if the name is taken); PUT creates or replaces.
+pub async fn upload(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    req: Request,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, req.headers())?;
+    if !valid_name(&name) {
+        return Err(bad_request("invalid object name"));
+    }
+    let mime = mime_essence(req.headers()).ok_or_else(|| bad_request("invalid content-type"))?;
+    let storage = &st.storage;
+    let settings = bucket_settings(&storage.pool, &bucket).await?;
+    let limit = settings.file_size_limit.map_or(storage.max_file_size, |l| {
+        (l as u64).min(storage.max_file_size)
+    });
+    if !mime_allowed(&mime, settings.allowed_mime_types.as_deref()) {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "mime_type_not_allowed",
+            "this bucket does not accept that content-type",
+        ));
+    }
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    if declared.is_some_and(|len| len > limit) {
+        return Err(too_large());
+    }
+    let upsert = req.method() == Method::PUT;
+
+    // Stream to a temp file, enforcing the limit as bytes arrive rather than trusting headers.
+    let tmp_path = storage
+        .dir
+        .join("tmp")
+        .join(uuid::Uuid::new_v4().to_string());
+    let tmp = TempFile(Some(tmp_path.clone()));
+    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(io_error)?;
+    let mut body = req.into_body();
+    let mut size: u64 = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| bad_request("upload interrupted"))?;
+        if let Ok(data) = frame.into_data() {
+            size += data.len() as u64;
+            if size > limit {
+                return Err(too_large());
+            }
+            file.write_all(&data).await.map_err(io_error)?;
+        }
+    }
+    file.sync_all().await.map_err(io_error)?;
+    drop(file);
+
+    let mut client = db::client(&storage.pool).await?;
+    let tx = db::begin_as(&mut client, &caller).await?;
+    let sql = if upsert {
+        "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
+         on conflict (bucket_id, name) do update
+            set size = excluded.size, mime_type = excluded.mime_type, updated_at = now()
+         returning id::text"
+    } else {
+        "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
+         returning id::text"
+    };
+    let size_i64 = size as i64;
+    let id: String = tx
+        .query_one(sql, &[&bucket, &name, &size_i64, &mime])
+        .await
+        .map_err(db::internal)?
+        .get(0);
+    // Rename before commit: a failed commit leaves an orphan file, never a row without data.
+    tokio::fs::rename(&tmp_path, storage.object_path(&id))
+        .await
+        .map_err(io_error)?;
+    tmp.keep();
+    tx.commit().await.map_err(db::internal)?;
+
+    Ok(
+        Json(json!({ "id": id, "bucket": bucket, "name": name, "size": size, "mime_type": mime }))
+            .into_response(),
+    )
+}
+
+pub async fn download(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, &headers)?;
+    let object = find_as(&st.storage, Some(&caller), &bucket, &name, false).await?;
+    serve(&st.storage, object, "private, no-store").await
+}
+
+pub async fn download_public(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let object = find_as(&st.storage, None, &bucket, &name, true).await?;
+    serve(&st.storage, object, "public, max-age=3600").await
+}
+
+pub async fn delete(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, &headers)?;
+    let mut client = db::client(&st.storage.pool).await?;
+    let tx = db::begin_as(&mut client, &caller).await?;
+    let row = tx
+        .query_opt(
+            "delete from storage.objects where bucket_id = $1 and name = $2 returning id::text",
+            &[&bucket, &name],
+        )
+        .await
+        .map_err(db::internal)?
+        .ok_or_else(not_found)?;
+    tx.commit().await.map_err(db::internal)?;
+    let id: String = row.get(0);
+    if let Err(e) = tokio::fs::remove_file(st.storage.object_path(&id)).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("kilnbase-core: could not remove object file {id}: {e}");
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SignRequest {
+    expires_in: u64,
+}
+
+pub async fn sign(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<SignRequest>,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, &headers)?;
+    if body.expires_in == 0 || body.expires_in > MAX_SIGNED_URL_LIFETIME {
+        return Err(bad_request(
+            "expires_in must be between 1 second and 7 days",
+        ));
+    }
+    // Only someone who can read the object may share it.
+    find_as(&st.storage, Some(&caller), &bucket, &name, false).await?;
+    let exp = now() + body.expires_in;
+    let tag = hmac::sign(
+        &st.storage.signing_key,
+        signed_message(&bucket, &name, exp).as_bytes(),
+    );
+    let token = format!("{exp}.{}", hex(tag.as_ref()));
+    let url = format!(
+        "/storage/v1/object/sign/{bucket}/{}?token={token}",
+        encode_path(&name)
+    );
+    Ok(Json(json!({ "signed_url": url, "expires_at": exp })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SignedQuery {
+    token: String,
+}
+
+pub async fn download_signed(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    Query(q): Query<SignedQuery>,
+) -> Result<Response, ApiError> {
+    let invalid = || {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_signature",
+            "invalid or expired link",
+        )
+    };
+    let (exp, tag) = q.token.split_once('.').ok_or_else(invalid)?;
+    let exp: u64 = exp.parse().map_err(|_| invalid())?;
+    let tag = unhex(tag).ok_or_else(invalid)?;
+    if exp < now() {
+        return Err(invalid());
+    }
+    // Constant-time comparison.
+    hmac::verify(
+        &st.storage.signing_key,
+        signed_message(&bucket, &name, exp).as_bytes(),
+        &tag,
+    )
+    .map_err(|_| invalid())?;
+    let object = find_as(&st.storage, None, &bucket, &name, false).await?;
+    serve(&st.storage, object, "private, no-store").await
+}
+
+struct ObjectRef {
+    id: String,
+    mime_type: String,
+    size: i64,
+}
+
+/// Looks the object up as `caller` (RLS applies), or as service_role when `caller` is None —
+/// only for public buckets or already-verified signed links.
+async fn find_as(
+    storage: &Storage,
+    caller: Option<&Caller>,
+    bucket: &str,
+    name: &str,
+    public_only: bool,
+) -> Result<ObjectRef, ApiError> {
+    if !valid_name(name) {
+        return Err(not_found());
+    }
+    let mut client = db::client(&storage.pool).await?;
+    let tx = match caller {
+        Some(c) => db::begin_as(&mut client, c).await?,
+        None => db::begin_as_service(&mut client).await?,
+    };
+    // Bucket rows have no user policies, so only service-role lookups may join them.
+    let sql = if public_only {
+        "select o.id::text, o.mime_type, o.size
+           from storage.objects o join storage.buckets b on b.id = o.bucket_id
+          where o.bucket_id = $1 and o.name = $2 and b.public"
+    } else {
+        "select id::text, mime_type, size from storage.objects where bucket_id = $1 and name = $2"
+    };
+    let row = tx
+        .query_opt(sql, &[&bucket, &name])
+        .await
+        .map_err(db::internal)?
+        // Missing and forbidden look the same, so object names cannot be probed.
+        .ok_or_else(not_found)?;
+    Ok(ObjectRef {
+        id: row.get(0),
+        mime_type: row.get(1),
+        size: row.get(2),
+    })
+}
+
+async fn serve(
+    storage: &Storage,
+    object: ObjectRef,
+    cache: &'static str,
+) -> Result<Response, ApiError> {
+    let file = tokio::fs::File::open(storage.object_path(&object.id))
+        .await
+        .map_err(io_error)?;
+    let mut res = Body::from_stream(ReaderStream::new(file)).into_response();
+    let h = res.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&object.mime_type) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(object.size));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    // Uploaded HTML/SVG must never run as script on the API's origin.
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    Ok(res)
+}
+
+#[derive(Deserialize)]
+pub struct NewBucket {
+    id: String,
+    #[serde(default)]
+    public: bool,
+    file_size_limit: Option<i64>,
+    allowed_mime_types: Option<Vec<String>>,
+}
+
+pub async fn create_bucket(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<NewBucket>,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, &headers)?;
+    if caller.role != "service_role" {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "creating buckets requires the service_role key",
+        ));
+    }
+    let mut client = db::client(&st.storage.pool).await?;
+    let tx = db::begin_as(&mut client, &caller).await?;
+    tx.execute(
+        "insert into storage.buckets (id, public, file_size_limit, allowed_mime_types)
+         values ($1, $2, $3, $4)",
+        &[
+            &body.id,
+            &body.public,
+            &body.file_size_limit,
+            &body.allowed_mime_types,
+        ],
+    )
+    .await
+    .map_err(db::internal)?;
+    tx.commit().await.map_err(db::internal)?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": body.id }))).into_response())
+}
+
+fn signed_message(bucket: &str, name: &str, exp: u64) -> String {
+    // Neither bucket ids nor valid names can contain '\n', so the fields cannot be shifted.
+    format!("{bucket}\n{name}\n{exp}")
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+fn encode_path(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn io_error(e: std::io::Error) -> ApiError {
+    eprintln!("kilnbase-core: storage io error: {e}");
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "internal error",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names() {
+        for ok in [
+            "a.txt",
+            "dir/sub/file.png",
+            "unicode-ğüş.txt",
+            "with space.txt",
+        ] {
+            assert!(valid_name(ok), "{ok}");
+        }
+        for bad in [
+            "", "/abs", "a//b", "../x", "a/../b", "a/./b", "a/", "a\\b", "a\nb", "a\0b",
+        ] {
+            assert!(!valid_name(bad), "{bad:?}");
+        }
+        assert!(!valid_name(&"a".repeat(1025)));
+    }
+
+    #[test]
+    fn mime_parsing_and_allow_list() {
+        let mut h = HeaderMap::new();
+        assert_eq!(
+            mime_essence(&h).as_deref(),
+            Some("application/octet-stream")
+        );
+        h.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("Image/PNG; charset=x"),
+        );
+        assert_eq!(mime_essence(&h).as_deref(), Some("image/png"));
+        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("nonsense"));
+        assert_eq!(mime_essence(&h), None);
+
+        let allowed = vec!["image/*".to_string(), "application/pdf".to_string()];
+        assert!(mime_allowed("image/png", Some(&allowed)));
+        assert!(mime_allowed("application/pdf", Some(&allowed)));
+        assert!(!mime_allowed("text/html", Some(&allowed)));
+        assert!(mime_allowed("text/html", None));
+    }
+
+    #[test]
+    fn hex_round_trip_and_path_encoding() {
+        assert_eq!(unhex(&hex(&[0, 15, 255])).unwrap(), vec![0, 15, 255]);
+        assert!(unhex("abc").is_none());
+        assert!(unhex("zz").is_none());
+        assert_eq!(encode_path("a b/ğ?.txt"), "a%20b/%C4%9F%3F.txt");
+    }
+}

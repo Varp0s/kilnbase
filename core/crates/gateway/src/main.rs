@@ -1,7 +1,9 @@
 mod auth;
 mod config;
+mod db;
 mod error;
 mod proxy;
+mod storage;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -11,7 +13,7 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use jsonwebtoken::DecodingKey;
 use serde_json::json;
@@ -21,6 +23,7 @@ struct AppState {
     postgrest_url: String,
     auth_url: String,
     http: proxy::HttpClient,
+    storage: storage::Storage,
 }
 
 #[tokio::main]
@@ -33,17 +36,58 @@ async fn main() -> ExitCode {
         }
     };
 
+    let pool = match db::pool(&cfg.database_url) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("kilnbase-core: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let storage = storage::Storage {
+        pool,
+        dir: cfg.storage_dir,
+        max_file_size: cfg.storage_max_file_size,
+        signing_key: aws_lc_rs::hmac::Key::new(
+            aws_lc_rs::hmac::HMAC_SHA256,
+            cfg.storage_signing_key.as_bytes(),
+        ),
+    };
+    if let Err(e) = storage.prepare_dirs().await {
+        eprintln!(
+            "kilnbase-core: storage directory {} is not writable: {e}",
+            storage.dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
     let state = Arc::new(AppState {
         keys: cfg.keys,
         postgrest_url: cfg.postgrest_url,
         auth_url: cfg.auth_url,
         http: proxy::client(),
+        storage,
     });
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/rest/v1/", any(rest))
         .route("/rest/v1/{*path}", any(rest))
         .route("/auth/v1/{*path}", any(auth_service))
+        .route("/storage/v1/bucket", post(storage::create_bucket))
+        .route(
+            "/storage/v1/object/public/{bucket}/{*name}",
+            get(storage::download_public),
+        )
+        .route(
+            "/storage/v1/object/sign/{bucket}/{*name}",
+            get(storage::download_signed).post(storage::sign),
+        )
+        .route(
+            "/storage/v1/object/{bucket}/{*name}",
+            get(storage::download)
+                .post(storage::upload)
+                .put(storage::upload)
+                .delete(storage::delete),
+        )
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
@@ -71,7 +115,7 @@ async fn main() -> ExitCode {
 
 async fn rest(State(st): State<Arc<AppState>>, mut req: Request) -> Response {
     let token = match auth::authorize(&st.keys, req.headers()) {
-        Ok(t) => t,
+        Ok(caller) => caller.token,
         Err(e) => return e.into_response(),
     };
     // Verified JWTs are base64url + dots, so this cannot fail; handled anyway rather than unwrapped.

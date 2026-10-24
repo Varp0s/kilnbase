@@ -56,6 +56,10 @@ services:
     restart: unless-stopped
     environment:
       KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
+      KILNBASE_DATABASE_URL: postgres://authenticator:${KILNBASE_AUTHENTICATOR_PASSWORD}@db:5432/postgres
+      KILNBASE_STORAGE_SIGNING_KEY: ${KILNBASE_STORAGE_SIGNING_KEY:?run `kilnbase init` first}
+    volumes:
+      - storage-data:/data
     ports:
       - "8000:8000"
     read_only: true
@@ -67,3 +71,4 @@ services:
 
 volumes:
   db-data:
+  storage-data:

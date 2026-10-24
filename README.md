@@ -56,6 +56,34 @@ curl -X POST localhost:8000/auth/v1/logout -H "apikey: $KILNBASE_ANON_KEY" -H "A
 - Refresh tokens are single-use. Presenting a used one again is treated as theft and ends the whole session.
 - Failed sign-ins are rate limited per email and per client IP.
 
+### Storage
+
+```sh
+# create a bucket (service_role only); public buckets are readable without credentials
+curl -X POST localhost:8000/storage/v1/bucket -H "apikey: $KILNBASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"avatars","public":false,"file_size_limit":1048576,"allowed_mime_types":["image/*"]}'
+
+# upload (POST creates, PUT creates or replaces), download, delete
+curl -X POST localhost:8000/storage/v1/object/avatars/ada/me.png -H "apikey: $KILNBASE_ANON_KEY" \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: image/png" --data-binary @me.png
+curl localhost:8000/storage/v1/object/avatars/ada/me.png -H "apikey: $KILNBASE_ANON_KEY" -H "Authorization: Bearer <access_token>"
+
+# time-limited link anyone can open
+curl -X POST localhost:8000/storage/v1/object/sign/avatars/ada/me.png -H "apikey: $KILNBASE_ANON_KEY" \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" -d '{"expires_in":3600}'
+```
+
+Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
+
+```sql
+create policy own_avatars on storage.objects for all to authenticated
+  using (bucket_id = 'avatars' and owner = auth.uid())
+  with check (bucket_id = 'avatars' and owner = auth.uid());
+```
+
+Uploads stream to disk with the size limit enforced while bytes arrive. Files are stored under their database ID, never under the client-supplied name, and are served with `nosniff` and a sandboxing CSP so uploaded HTML cannot run on your API's origin.
+
 ## Architecture
 
 | Service | Language | Role |

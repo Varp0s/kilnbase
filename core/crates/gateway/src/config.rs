@@ -10,6 +10,10 @@ pub struct Config {
     pub port: u16,
     pub postgrest_url: String,
     pub auth_url: String,
+    pub database_url: String,
+    pub storage_dir: std::path::PathBuf,
+    pub storage_max_file_size: u64,
+    pub storage_signing_key: String,
     /// Verification keys by `kid`; the gateway never holds a signing key.
     pub keys: HashMap<String, DecodingKey>,
 }
@@ -48,11 +52,29 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     };
     let postgrest_url = upstream("KILNBASE_POSTGREST_URL", "http://postgrest:3000");
     let auth_url = upstream("KILNBASE_AUTH_URL", "http://auth:9999");
+    let database_url = required(&get, "KILNBASE_DATABASE_URL")?;
+    let storage_signing_key = required(&get, "KILNBASE_STORAGE_SIGNING_KEY")?;
+    if storage_signing_key.len() < 32 {
+        return Err("KILNBASE_STORAGE_SIGNING_KEY must be at least 32 characters".into());
+    }
+    let storage_dir = get("KILNBASE_STORAGE_DIR")
+        .unwrap_or_else(|| "/data".into())
+        .into();
+    let storage_max_file_size = match get("KILNBASE_STORAGE_MAX_FILE_SIZE") {
+        None => 50 * 1024 * 1024,
+        Some(v) => v
+            .parse()
+            .map_err(|_| format!("KILNBASE_STORAGE_MAX_FILE_SIZE is not a byte count: {v}"))?,
+    };
 
     Ok(Config {
         port,
         postgrest_url,
         auth_url,
+        database_url,
+        storage_dir,
+        storage_max_file_size,
+        storage_signing_key,
         keys,
     })
 }
@@ -87,32 +109,52 @@ aXh731/prgSjHJQkHEVDIcvpTjmqYxdgY4pcnn8l0k6u/TanBK5xyb2S
         move |k| map.get(k).cloned()
     }
 
+    /// A complete valid environment with `overrides` applied on top.
+    pub fn valid(overrides: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+        let mut map: HashMap<String, String> = [
+            ("KILNBASE_JWKS", TEST_JWKS),
+            (
+                "KILNBASE_DATABASE_URL",
+                "postgres://authenticator:pw@db/postgres",
+            ),
+            (
+                "KILNBASE_STORAGE_SIGNING_KEY",
+                "0123456789abcdef0123456789abcdef",
+            ),
+        ]
+        .iter()
+        .chain(overrides)
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        map.retain(|_, v| !v.is_empty());
+        move |k| map.get(k).cloned()
+    }
+
     #[test]
     fn accepts_valid_config() {
-        let cfg = load(env(&[("KILNBASE_JWKS", TEST_JWKS)])).unwrap();
+        let cfg = load(valid(&[])).unwrap();
         assert_eq!(cfg.port, 8000);
         assert_eq!(cfg.postgrest_url, "http://postgrest:3000");
+        assert_eq!(cfg.storage_max_file_size, 50 * 1024 * 1024);
         assert!(cfg.keys.contains_key("test"));
     }
 
     #[test]
-    fn rejects_missing_placeholder_and_bad_jwks() {
+    fn rejects_missing_placeholder_and_bad_values() {
         assert!(load(env(&[])).is_err());
-        assert!(load(env(&[("KILNBASE_JWKS", PLACEHOLDER)])).is_err());
-        assert!(load(env(&[("KILNBASE_JWKS", r#"{"keys":[]}"#)])).is_err());
-        assert!(load(env(&[("KILNBASE_JWKS", "not json")])).is_err());
         let no_kid = TEST_JWKS.replace(r#","kid":"test""#, "");
-        assert!(load(env(&[("KILNBASE_JWKS", &no_kid)])).is_err());
-    }
-
-    #[test]
-    fn rejects_bad_port() {
-        assert!(
-            load(env(&[
-                ("KILNBASE_JWKS", TEST_JWKS),
-                ("KILNBASE_PORT", "99999")
-            ]))
-            .is_err()
-        );
+        for (k, v) in [
+            ("KILNBASE_JWKS", PLACEHOLDER),
+            ("KILNBASE_JWKS", r#"{"keys":[]}"#),
+            ("KILNBASE_JWKS", "not json"),
+            ("KILNBASE_JWKS", no_kid.as_str()),
+            ("KILNBASE_DATABASE_URL", ""),
+            ("KILNBASE_STORAGE_SIGNING_KEY", PLACEHOLDER),
+            ("KILNBASE_STORAGE_SIGNING_KEY", "too-short"),
+            ("KILNBASE_STORAGE_MAX_FILE_SIZE", "lots"),
+            ("KILNBASE_PORT", "99999"),
+        ] {
+            assert!(load(valid(&[(k, v)])).is_err(), "{k}={v}");
+        }
     }
 }

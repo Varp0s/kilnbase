@@ -2,57 +2,57 @@ use std::collections::HashMap;
 
 use axum::http::{HeaderMap, StatusCode, header};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::ApiError;
-
-#[derive(Debug, Deserialize)]
-pub struct Claims {
-    pub role: String,
-}
 
 const API_KEY_ROLES: &[&str] = &["anon", "service_role"];
 const REQUEST_ROLES: &[&str] = &["anon", "authenticated", "service_role"];
 
-/// Checks that the `apikey` header holds a valid anon or service_role key; returns it.
-pub fn check_api_key<'a>(
+/// A verified caller. `role` is always one of `REQUEST_ROLES`, so it is safe to interpolate
+/// into `SET LOCAL ROLE`.
+#[derive(Debug)]
+pub struct Caller {
+    pub token: String,
+    pub role: &'static str,
+    pub claims: Value,
+}
+
+/// Checks that the `apikey` header holds a valid anon or service_role key.
+pub fn check_api_key(
     keys: &HashMap<String, DecodingKey>,
-    headers: &'a HeaderMap,
-) -> Result<&'a str, ApiError> {
+    headers: &HeaderMap,
+) -> Result<Caller, ApiError> {
     let api_key = headers
         .get("apikey")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| unauthorized("missing apikey header"))?;
-    let api_claims = verify(keys, api_key)?;
-    if !API_KEY_ROLES.contains(&api_claims.role.as_str()) {
-        return Err(unauthorized("invalid apikey"));
-    }
-    Ok(api_key)
+    verify(keys, api_key, API_KEY_ROLES).map_err(|_| unauthorized("invalid apikey"))
 }
 
-/// Checks the `apikey` header and optional bearer token; returns the token to forward upstream.
+/// Checks the `apikey` header and optional bearer token; the bearer token, if any, wins.
 pub fn authorize(
     keys: &HashMap<String, DecodingKey>,
     headers: &HeaderMap,
-) -> Result<String, ApiError> {
-    let api_key = check_api_key(keys, headers)?;
+) -> Result<Caller, ApiError> {
+    let api_caller = check_api_key(keys, headers)?;
 
     let Some(auth) = headers.get(header::AUTHORIZATION) else {
-        return Ok(api_key.to_owned());
+        return Ok(api_caller);
     };
     let token = auth
         .to_str()
         .ok()
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| unauthorized("authorization header must be a bearer token"))?;
-    let claims = verify(keys, token)?;
-    if !REQUEST_ROLES.contains(&claims.role.as_str()) {
-        return Err(unauthorized("invalid token"));
-    }
-    Ok(token.to_owned())
+    verify(keys, token, REQUEST_ROLES)
 }
 
-fn verify(keys: &HashMap<String, DecodingKey>, token: &str) -> Result<Claims, ApiError> {
+fn verify(
+    keys: &HashMap<String, DecodingKey>,
+    token: &str,
+    allowed_roles: &[&'static str],
+) -> Result<Caller, ApiError> {
     // Algorithm is fixed by us, never taken from the token header.
     let header = decode_header(token).map_err(|_| unauthorized("invalid token"))?;
     let key = header
@@ -62,9 +62,19 @@ fn verify(keys: &HashMap<String, DecodingKey>, token: &str) -> Result<Claims, Ap
         .ok_or_else(|| unauthorized("invalid token"))?;
     let mut validation = Validation::new(Algorithm::ES256);
     validation.leeway = 30;
-    decode::<Claims>(token, key, &validation)
-        .map(|data| data.claims)
-        .map_err(|_| unauthorized("invalid token"))
+    let claims = decode::<Value>(token, key, &validation)
+        .map_err(|_| unauthorized("invalid token"))?
+        .claims;
+    let role = claims
+        .get("role")
+        .and_then(Value::as_str)
+        .and_then(|r| allowed_roles.iter().find(|allowed| **allowed == r))
+        .ok_or_else(|| unauthorized("invalid token"))?;
+    Ok(Caller {
+        token: token.to_owned(),
+        role,
+        claims,
+    })
 }
 
 fn unauthorized(message: &'static str) -> ApiError {
@@ -81,7 +91,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn keys() -> HashMap<String, DecodingKey> {
-        load(env(&[("KILNBASE_JWKS", TEST_JWKS)])).unwrap().keys
+        load(valid(&[])).unwrap().keys
     }
 
     fn now() -> u64 {
@@ -118,17 +128,18 @@ mod tests {
     #[test]
     fn anon_key_alone_is_forwarded() {
         let anon = token("anon", 3600, "test");
-        assert_eq!(authorize(&keys(), &headers(&anon, None)).unwrap(), anon);
+        let caller = authorize(&keys(), &headers(&anon, None)).unwrap();
+        assert_eq!(caller.token, anon);
+        assert_eq!(caller.role, "anon");
     }
 
     #[test]
     fn user_token_takes_precedence() {
         let anon = token("anon", 3600, "test");
         let user = token("authenticated", 3600, "test");
-        assert_eq!(
-            authorize(&keys(), &headers(&anon, Some(&user))).unwrap(),
-            user
-        );
+        let caller = authorize(&keys(), &headers(&anon, Some(&user))).unwrap();
+        assert_eq!(caller.token, user);
+        assert_eq!(caller.role, "authenticated");
     }
 
     #[test]

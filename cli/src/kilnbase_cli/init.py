@@ -25,6 +25,7 @@ def generate_env() -> str:
     values = {
         "POSTGRES_PASSWORD": secrets.token_urlsafe(32),
         "KILNBASE_AUTHENTICATOR_PASSWORD": secrets.token_urlsafe(32),
+        "KILNBASE_STORAGE_SIGNING_KEY": secrets.token_urlsafe(48),
         "KILNBASE_JWT_PRIVATE_JWK": f"'{json.dumps(private_jwk, separators=(',', ':'))}'",
         "KILNBASE_JWKS": f"'{json.dumps({'keys': [public_jwk]}, separators=(',', ':'))}'",
         "KILNBASE_ANON_KEY": api_key("anon"),
