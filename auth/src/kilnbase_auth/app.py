@@ -210,8 +210,10 @@ def create_app(config: Config) -> FastAPI:
             "select exists (select 1 from auth.mfa_factors where user_id = $1 and verified)",
             user_id,
         )
-        # Enrolled users get an API-usable token only after proving the second factor.
-        mfa_pending = has_factor and aal != "aal2"
+        # Enrolled users get an API-usable token only after proving the second factor; with
+        # MFA required, so do users who have not enrolled yet (guests have nothing to protect).
+        must_verify = has_factor or (config.mfa_required and not user["is_anonymous"])
+        mfa_pending = must_verify and aal != "aal2"
         access_token, expires_at = signer.access_token(
             str(user_id),
             email,
@@ -953,7 +955,9 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/factors")
     async def enroll_factor(request: Request):
         claims = await current_session(request)
-        if claims is None or claims["role"] != "authenticated":
+        # mfa_pending may enrol: that is how users get through a KILNBASE_AUTH_MFA_REQUIRED sign-in.
+        # Users who already have a factor are stopped by the enrolled check below.
+        if claims is None or claims["role"] not in ("authenticated", "mfa_pending"):
             return error(401, "unauthorized", "a fully signed-in session is required")
         secret = pyotp.random_base32()
         async with app.state.pool.acquire() as conn, conn.transaction():

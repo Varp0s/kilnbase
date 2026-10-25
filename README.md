@@ -129,7 +129,9 @@ data. JS: `kb.auth.signInAnonymously()`, `kb.auth.updateUser({ email, password }
 **Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
 app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
 `"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is
-enforced for every enrolled user without extra configuration. Codes are single-use and wrong codes are rate
+enforced for every enrolled user without extra configuration. Set `KILNBASE_AUTH_MFA_REQUIRED=true` to require
+it of everyone: users without a factor then get the same restricted token, which can only enrol and verify one
+(guest users are exempt). Codes are single-use and wrong codes are rate
 limited. In the JS client: `kb.auth.mfa.enroll()`, `kb.auth.mfa.verify(id, code)`, `kb.auth.mfa.unenroll(id)`.
 
 ### Storage

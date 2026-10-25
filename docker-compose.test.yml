@@ -8,6 +8,17 @@ services:
     ports:
       - "9100:9100"
 
+  # A second auth instance on the same database with MFA required, reached directly by test_mfa.py.
+  auth-mfa:
+    extends:
+      file: docker-compose.yml
+      service: auth
+    environment:
+      KILNBASE_AUTH_MFA_REQUIRED: "true"
+      KILNBASE_AUTH_ANONYMOUS: "true"
+    ports:
+      - "9998:9999"
+
   mailpit:
     image: axllent/mailpit:v1.32.0
     ports:

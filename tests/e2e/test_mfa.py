@@ -1,6 +1,7 @@
 import time
 import uuid
 
+import httpx2 as httpx
 import jwt
 import pyotp
 import pytest
@@ -138,3 +139,30 @@ def test_cannot_enrol_twice_or_touch_others_factors(client, keys, enrolled):
     ).json()
     r = verify(client, keys, other["access_token"], enrolled["factor"], enrolled["totp"].now())
     assert r.status_code == 404
+
+
+MFA_REQUIRED_URL = "http://localhost:9998"  # auth-mfa in docker-compose.test.yml
+
+
+def test_required_mfa_blocks_the_apis_until_a_factor_is_verified(client, keys):
+    with httpx.Client(base_url=MFA_REQUIRED_URL) as strict:
+        email = f"req-{uuid.uuid4().hex[:10]}@example.com"
+        session = strict.post("/signup", json={"email": email, "password": PASSWORD}).json()
+        assert session["mfa_required"] is True
+        token = session["access_token"]
+        assert rest_status(client, keys, token) == 401
+
+        # The restricted token can enrol, and verifying upgrades it to a full session.
+        factor = strict.post("/factors", headers={"Authorization": f"Bearer {token}"}).json()
+        r = strict.post(
+            f"/factors/{factor['id']}/verify",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"code": pyotp.TOTP(factor["secret"]).now()},
+        )
+        assert r.status_code == 200, r.text
+        assert rest_status(client, keys, r.json()["access_token"]) == 200
+
+        # Guests have no credentials to protect and are exempt.
+        guest = strict.post("/anonymous").json()
+        assert guest["mfa_required"] is False
+        assert rest_status(client, keys, guest["access_token"]) == 200

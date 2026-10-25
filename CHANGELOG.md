@@ -38,7 +38,8 @@ First release candidate (planned as 0.1.0).
 - **Anonymous users** (opt-in): guest accounts with an `is_anonymous` claim that can later be upgraded in place.
 - **MFA (TOTP)**: enrolment, single-use codes with ±30 s drift, rate-limited verification; enrolled users'
   password-only sessions get a token the APIs reject until the second factor is verified; refresh tokens issued
-  before the upgrade are revoked.
+  before the upgrade are revoked. `KILNBASE_AUTH_MFA_REQUIRED=true` makes a second factor mandatory for every
+  non-guest user.
 - **CLI**: `kilnbase init` (keys and secrets) and `kilnbase doctor` (secret and database security audit).
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
 - **Migrations** are checksummed; edited or unknown applied migrations stop the auth service.

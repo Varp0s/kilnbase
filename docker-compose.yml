@@ -34,6 +34,8 @@ services:
       KILNBASE_AUTH_MAILS_PER_IP_HOUR: ${KILNBASE_AUTH_MAILS_PER_IP_HOUR:-30}
       # Allow POST /auth/v1/anonymous (guest users that can later add an email and password).
       KILNBASE_AUTH_ANONYMOUS: ${KILNBASE_AUTH_ANONYMOUS:-false}
+      # Every non-guest user must enrol and verify a second factor before using the APIs.
+      KILNBASE_AUTH_MFA_REQUIRED: ${KILNBASE_AUTH_MFA_REQUIRED:-false}
       # A provider is enabled when its client ID is set.
       KILNBASE_OAUTH_GITHUB_CLIENT_ID: ${KILNBASE_OAUTH_GITHUB_CLIENT_ID:-}
       KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}
