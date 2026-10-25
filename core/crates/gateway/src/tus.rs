@@ -152,13 +152,16 @@ async fn sweep(storage: &Storage) {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        let age = tokio::fs::metadata(entry.path().join("data"))
-            .await
+        // Without `data` (a creation in progress, or one that failed) the directory's age counts.
+        let meta = match tokio::fs::metadata(entry.path().join("data")).await {
+            Ok(m) => Ok(m),
+            Err(_) => tokio::fs::metadata(entry.path()).await,
+        };
+        let age = meta
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok());
-        // A directory without data is a creation that failed halfway; it is just as dead.
-        if age.is_none_or(|a| a > MAX_AGE) {
+        if age.is_some_and(|a| a > MAX_AGE) {
             let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
