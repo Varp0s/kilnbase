@@ -152,3 +152,47 @@ def test_expired_token_is_disconnected(client, keys):
         time.sleep(3)  # open connections check exp strictly, without the handshake leeway
         rest(client, keys, writer, "POST", "e2e_rt", json={"body": "ping"})
         assert next_event(ws)["code"] == "token_expired"
+
+
+def test_events_survive_a_listener_reconnect(client, keys):
+    _, a = keys.user()
+    with socket(keys, a) as ws:
+        subscribe(ws)
+        # Cut the server's LISTEN connection; it reconnects after ~2 s and must replay the gap.
+        psql(
+            "select pg_terminate_backend(pid) from pg_stat_activity"
+            " where query ilike 'listen kilnbase_realtime%'"
+        )
+        rest(client, keys, a, "POST", "e2e_rt", json={"body": "during outage"})
+        event = next_event(ws, timeout=10)
+        assert event["record"]["body"] == "during outage"
+        assert isinstance(event["event_id"], int)
+
+
+def test_clients_resume_from_their_last_event(client, keys):
+    _, a = keys.user()
+    _, b = keys.user()
+    with socket(keys, a) as ws:
+        subscribe(ws)
+        rest(client, keys, a, "POST", "e2e_rt", json={"body": "seen"})
+        last = next_event(ws)["event_id"]
+
+    # Offline: two own rows and one row RLS hides from us.
+    rest(client, keys, a, "POST", "e2e_rt", json={"body": "missed 1"})
+    rest(client, keys, b, "POST", "e2e_rt", json={"body": "not mine"})
+    rest(client, keys, a, "POST", "e2e_rt", json={"body": "missed 2"})
+
+    with socket(keys, a) as ws:
+        ws.send(json.dumps({"type": "subscribe", "id": "s1", "table": "e2e_rt", "since": last}))
+        assert json.loads(ws.recv(timeout=5))["type"] == "subscribed"
+        bodies = [next_event(ws)["record"]["body"] for _ in range(2)]
+        assert bodies == ["missed 1", "missed 2"]
+        assert_silent(ws)
+
+
+def test_resume_too_far_back_asks_for_a_refetch(keys):
+    _, a = keys.user()
+    with socket(keys, a) as ws:
+        ws.send(json.dumps({"type": "subscribe", "id": "s1", "table": "e2e_rt", "since": -100}))
+        assert json.loads(ws.recv(timeout=5))["type"] == "subscribed"
+        assert json.loads(ws.recv(timeout=5))["code"] == "resync_required"

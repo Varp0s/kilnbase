@@ -67,7 +67,7 @@ async fn main() -> ExitCode {
     }
 
     let hub = realtime::hub();
-    realtime::spawn_listener(cfg.database_url.clone(), hub.clone());
+    realtime::spawn_listener(cfg.database_url.clone(), storage.pool.clone(), hub.clone());
 
     let state = Arc::new(AppState {
         keys: cfg.keys,

@@ -23,6 +23,9 @@ First release candidate (planned as 0.1.0).
   decides who receives it. Protocol in `docs/realtime-protocol.md`.
 - **Realtime channels**: broadcast and presence, closed by default and opened per channel/action by
   `realtime.authorize()` (evaluated as the caller); per-connection rate and size limits.
+- **Realtime resume**: changes go through a 10-minute outbox, so events committed while the server's
+  database connection was down are replayed, and clients resume with `since` (the JS client does this
+  automatically); gaps that are too old or too long answer `resync_required`.
 - **JS/TS client** (`kilnbase` on npm, no runtime dependencies): auth with cross-tab-safe refresh, query
   builder, storage and realtime.
 - **OAuth / OIDC sign-in**: GitHub, Google and generic OIDC providers; PKCE with the provider and with the

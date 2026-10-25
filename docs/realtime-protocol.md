@@ -25,25 +25,29 @@ select kilnbase.disable_realtime('public.todos');
 
 ```json
 {"type": "subscribe", "id": "todos-1", "table": "todos"}
+{"type": "subscribe", "id": "todos-1", "table": "todos", "since": 1234}
 {"type": "unsubscribe", "id": "todos-1"}
 ```
 
 `id` is chosen by the client (1–128 characters) and echoed on every event. Up to 100 subscriptions per
 connection. Only tables in `public` that the caller may `SELECT` can be subscribed to.
 
+`since` is optional: the last `event_id` the client received on an earlier connection. After `subscribed`,
+the server first sends the changes committed after it (RLS applies as usual), then live events.
+
 ## Server → client
 
 ```json
 {"type": "subscribed", "id": "todos-1", "table": "todos"}
 {"type": "unsubscribed", "id": "todos-1"}
-{"type": "change", "id": "todos-1", "table": "todos", "op": "INSERT", "record": {"id": 1, "title": "…"}}
-{"type": "change", "id": "todos-1", "table": "todos", "op": "UPDATE", "record": {"id": 1, "title": "…"}}
-{"type": "change", "id": "todos-1", "table": "todos", "op": "DELETE", "old_pk": {"id": 1}}
+{"type": "change", "id": "todos-1", "event_id": 1235, "table": "todos", "op": "INSERT", "record": {"id": 1, "title": "…"}}
+{"type": "change", "id": "todos-1", "event_id": 1236, "table": "todos", "op": "UPDATE", "record": {"id": 1, "title": "…"}}
+{"type": "change", "id": "todos-1", "event_id": 1237, "table": "todos", "op": "DELETE", "old_pk": {"id": 1}}
 {"type": "error", "code": "forbidden", "message": "…"}
 ```
 
 Error codes: `invalid_message`, `forbidden`, `realtime_not_enabled`, `too_many_subscriptions`, `lagged`,
-`token_expired`, `internal`.
+`token_expired`, `resync_required`, `internal`.
 
 ## Delivery rules
 
@@ -52,8 +56,14 @@ Error codes: `invalid_message`, `forbidden`, `realtime_not_enabled`, `too_many_s
 - `DELETE` events carry only the primary key, because the row no longer exists to be checked. They reach every
   subscriber of the table (all of whom were checked for `SELECT` on the table when subscribing).
 - Rows of any size are delivered; only the primary key travels through `NOTIFY`.
-- Delivery is at-most-once. Changes committed while the server is reconnecting to Postgres, or while a slow
-  client lags (`lagged` error), are lost — refetch over REST to resync.
+- Changes committed while the server is reconnecting to Postgres are replayed once it is back.
+- Every change gets an `event_id` (increasing in write order) from a short-lived outbox kept for
+  10 minutes. A client that reconnects can resume with `since`; it may then see an event twice, so dedupe by
+  `event_id`. If the gap is older than the outbox or longer than 1000 events, the server answers
+  `resync_required` instead — refetch over REST. A slow client that lags (`lagged` error) should resume the
+  same way.
+- A transaction that commits after a later-numbered one can be missed by a resume; refetch if you need
+  strict consistency.
 
 ## Broadcast and presence channels
 

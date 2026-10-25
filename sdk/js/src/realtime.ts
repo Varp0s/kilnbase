@@ -1,8 +1,8 @@
 import type { AuthClient } from "./auth.js";
 
 export type ChangeEvent<T> =
-  | { op: "INSERT" | "UPDATE"; table: string; record: T }
-  | { op: "DELETE"; table: string; old_pk: Record<string, unknown> };
+  | { op: "INSERT" | "UPDATE"; event_id: number; table: string; record: T }
+  | { op: "DELETE"; event_id: number; table: string; old_pk: Record<string, unknown> };
 
 export interface RealtimeError {
   code: string;
@@ -32,6 +32,10 @@ interface Subscription {
   table: string;
   onChange: (event: ChangeEvent<never>) => void;
   onError?: (error: RealtimeError) => void;
+  /** Newest event received, sent as `since` on resubscribe so missed changes are replayed. */
+  last?: number;
+  /** Recently delivered ids: a resume can repeat events that also arrive live. */
+  recent: Set<number>;
 }
 
 interface ChannelEntry {
@@ -41,12 +45,13 @@ interface ChannelEntry {
 }
 
 const MAX_BACKOFF_MS = 30_000;
+const RECENT_IDS = 1000;
 const joinId = (name: string) => `ch:${name}`;
 
 /**
  * One shared WebSocket per client. It opens on the first subscription or channel, re-subscribes and
  * re-joins everything after reconnects, and reconnects with a fresh token when the session changes
- * or expires. Delivery is at-most-once: refetch over REST after a reconnect if you need full consistency.
+ * or expires. Subscriptions resume where they left off; on a `resync_required` error, refetch over REST.
  */
 export class RealtimeClient {
   #ws: WebSocket | null = null;
@@ -71,7 +76,7 @@ export class RealtimeClient {
     onError?: (error: RealtimeError) => void,
   ): () => void {
     const id = `s${++this.#counter}`;
-    this.#subs.set(id, { table, onChange: onChange as Subscription["onChange"], onError });
+    this.#subs.set(id, { table, onChange: onChange as Subscription["onChange"], onError, recent: new Set() });
     if (this.#open()) this.#send({ type: "subscribe", id, table });
     else void this.#connect();
     return () => {
@@ -129,7 +134,7 @@ export class RealtimeClient {
       this.#ws = ws;
       ws.onopen = () => {
         this.#attempt = 0;
-        for (const [id, sub] of this.#subs) this.#send({ type: "subscribe", id, table: sub.table });
+        for (const [id, sub] of this.#subs) this.#send({ type: "subscribe", id, table: sub.table, since: sub.last });
         for (const name of this.#channels.keys()) this.#send({ type: "join", id: joinId(name), channel: name });
       };
       ws.onmessage = (e) => this.#receive(String(e.data));
@@ -157,7 +162,12 @@ export class RealtimeClient {
     switch (msg.type) {
       case "change": {
         const sub = this.#subs.get(String(msg.id));
-        sub?.onChange(msg as unknown as ChangeEvent<never>);
+        const eventId = Number(msg.event_id);
+        if (!sub || sub.recent.has(eventId)) return;
+        sub.recent.add(eventId);
+        if (sub.recent.size > RECENT_IDS) sub.recent.delete(sub.recent.values().next().value as number);
+        sub.last = Math.max(sub.last ?? eventId, eventId);
+        sub.onChange(msg as unknown as ChangeEvent<never>);
         return;
       }
       case "joined":

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,10 +21,18 @@ use crate::db;
 const CHANNEL: &str = "kilnbase_realtime";
 const MAX_SUBSCRIPTIONS: usize = 100;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// Events a resuming client may catch up on; beyond that it must refetch.
+const REPLAY_LIMIT: i64 = 1000;
+/// How far below the newest seen id a reconnecting listener looks, to catch transactions that
+/// committed out of id order while it was away.
+const RECONNECT_OVERLAP: i64 = 1000;
+const RETENTION: &str = "10 minutes";
 
 /// One row change as published by `kilnbase.notify_change()`.
 #[derive(Debug, Deserialize)]
 pub struct Change {
+    /// Outbox id; increases with insertion order and lets clients resume.
+    id: i64,
     schema: String,
     table: String,
     op: String,
@@ -37,21 +45,117 @@ pub fn hub() -> Hub {
     broadcast::channel(4096).0
 }
 
-/// Keeps one LISTEN connection open forever, reconnecting on failure.
-/// shortcut: events committed while disconnected are lost; switch to logical replication
-/// (pgoutput + a slot) when delivery must survive reconnects.
-pub fn spawn_listener(database_url: String, hub: Hub) {
+/// Ids already published, so replays after a reconnect never deliver an event twice.
+#[derive(Default)]
+struct Seen {
+    ids: HashSet<i64>,
+    order: VecDeque<i64>,
+    newest: Option<i64>,
+}
+
+impl Seen {
+    const CAPACITY: usize = 50_000;
+
+    /// True if `id` is new.
+    fn insert(&mut self, id: i64) -> bool {
+        if !self.ids.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > Self::CAPACITY
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ids.remove(&old);
+        }
+        self.newest = Some(self.newest.map_or(id, |n| n.max(id)));
+        true
+    }
+}
+
+/// Keeps one LISTEN connection open forever. After a reconnect it replays the outbox from just
+/// below the newest event it saw, so nothing committed while it was away is lost.
+pub fn spawn_listener(database_url: String, pool: Pool, hub: Hub) {
+    let pruner = pool.clone();
     tokio::spawn(async move {
+        let mut seen = Seen::default();
         loop {
-            if let Err(e) = listen(&database_url, &hub).await {
+            if let Err(e) = listen(&database_url, &pool, &hub, &mut seen).await {
                 eprintln!("kilnbase-core: realtime listener error: {e}");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(e) = prune(&pruner).await {
+                eprintln!("kilnbase-core: pruning realtime events failed: {e:?}");
+            }
+        }
+    });
 }
 
-async fn listen(database_url: &str, hub: &Hub) -> Result<(), tokio_postgres::Error> {
+async fn prune(pool: &Pool) -> Result<(), crate::error::ApiError> {
+    let mut client = db::client(pool).await?;
+    let tx = db::begin_as_service(&mut client).await?;
+    tx.execute(
+        &format!(
+            // The newest row is always kept: `replay` needs some retained id to tell a pruned gap
+            // from "nothing happened".
+            "delete from kilnbase.realtime_events where created_at < now() - interval '{RETENTION}'
+               and id < (select max(id) from kilnbase.realtime_events)"
+        ),
+        &[],
+    )
+    .await
+    .map_err(db::internal)?;
+    tx.commit().await.map_err(db::internal)
+}
+
+/// Outbox rows after `after`, optionally for one public table, plus the oldest id still retained.
+async fn load_events(
+    pool: &Pool,
+    table: Option<&str>,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<Change>, Option<i64>), crate::error::ApiError> {
+    let mut client = db::client(pool).await?;
+    let tx = db::begin_as_service(&mut client).await?;
+    let rows = tx
+        .query(
+            "select id, schema_name, table_name, op, pk::text from kilnbase.realtime_events
+              where id > $1 and ($2::text is null or (schema_name = 'public' and table_name = $2))
+              order by id limit $3",
+            &[&after, &table, &limit],
+        )
+        .await
+        .map_err(db::internal)?;
+    let oldest: Option<i64> = tx
+        .query_one("select min(id) from kilnbase.realtime_events", &[])
+        .await
+        .map_err(db::internal)?
+        .get(0);
+    let changes = rows
+        .into_iter()
+        .filter_map(|r| {
+            Some(Change {
+                id: r.get(0),
+                schema: r.get(1),
+                table: r.get(2),
+                op: r.get(3),
+                pk: serde_json::from_str(&r.get::<_, String>(4)).ok()?,
+            })
+        })
+        .collect();
+    Ok((changes, oldest))
+}
+
+async fn listen(
+    database_url: &str,
+    pool: &Pool,
+    hub: &Hub,
+    seen: &mut Seen,
+) -> Result<(), tokio_postgres::Error> {
     let (client, mut connection) = tokio_postgres::connect(database_url, NoTls).await?;
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
     let driver = tokio::spawn(async move {
@@ -74,10 +178,28 @@ async fn listen(database_url: &str, hub: &Hub) -> Result<(), tokio_postgres::Err
     client.batch_execute(&format!("listen {CHANNEL}")).await?;
     eprintln!("kilnbase-core: realtime listening");
 
+    // LISTEN is active before the replay query, so nothing can fall between the two.
+    if let Some(newest) = seen.newest {
+        match load_events(pool, None, newest - RECONNECT_OVERLAP, i64::MAX).await {
+            Ok((missed, _)) => {
+                for change in missed {
+                    if seen.insert(change.id) {
+                        drop(hub.send(Arc::new(change)));
+                    }
+                }
+            }
+            Err(e) => eprintln!("kilnbase-core: realtime replay failed: {e:?}"),
+        }
+    }
+
     while let Some(n) = notify_rx.recv().await {
         match serde_json::from_str::<Change>(n.payload()) {
             // No receivers is fine: nobody is subscribed right now.
-            Ok(change) => drop(hub.send(Arc::new(change))),
+            Ok(change) => {
+                if seen.insert(change.id) {
+                    drop(hub.send(Arc::new(change)));
+                }
+            }
             Err(e) => eprintln!("kilnbase-core: bad realtime payload: {e}"),
         }
     }
@@ -116,6 +238,9 @@ enum ClientMessage {
     Subscribe {
         id: String,
         table: String,
+        /// Resume after this event id (from a previous connection's `event_id`).
+        #[serde(default)]
+        since: Option<i64>,
     },
     Unsubscribe {
         id: String,
@@ -198,6 +323,15 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                         .presence(&caller, &mut member, &channel, state)
                         .into_iter()
                         .collect(),
+                    Ok(ClientMessage::Subscribe { id, table, since }) => {
+                        let reply = handle_client(pool, &caller, &mut subs,
+                            ClientMessage::Subscribe { id: id.clone(), table: table.clone(), since: None }).await;
+                        let mut out = vec![reply.clone()];
+                        if reply["type"] == "subscribed" && let Some(since) = since {
+                            out.extend(replay(pool, &caller, &id, &table, since).await);
+                        }
+                        out
+                    }
                     Ok(table_message) => vec![handle_client(pool, &caller, &mut subs, table_message).await],
                 };
                 for reply in replies {
@@ -245,25 +379,7 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                     let _ = send(&mut sink, expired_message()).await;
                     break;
                 }
-                let body = if change.op == "DELETE" {
-                    // The row is gone and cannot be re-checked; subscribers were vetted for
-                    // SELECT on the table when they subscribed.
-                    json!({ "old_pk": change.pk })
-                } else {
-                    match visible_row(pool, &caller, &change).await {
-                        Ok(Some(record)) => json!({ "record": record }),
-                        Ok(None) => continue,
-                        Err(e) => {
-                            eprintln!("kilnbase-core: realtime visibility check failed: {e:?}");
-                            continue;
-                        }
-                    }
-                };
-                for id in ids {
-                    let mut event = json!({ "type": "change", "id": id, "table": change.table, "op": change.op });
-                    if let (Value::Object(e), Value::Object(b)) = (&mut event, &body) {
-                        e.extend(b.clone());
-                    }
+                for event in render(pool, &caller, &change, &ids).await {
                     if !send(&mut sink, event).await {
                         break 'session;
                     }
@@ -273,6 +389,62 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
     }
     // Others must see this connection's presence disappear however the socket ended.
     st.channels.disconnect(&mut member);
+}
+
+/// The messages `caller` gets for `change`, one per matching subscription; empty if RLS hides it.
+async fn render(pool: &Pool, caller: &Caller, change: &Change, ids: &[&String]) -> Vec<Value> {
+    let body = if change.op == "DELETE" {
+        // The row is gone and cannot be re-checked; subscribers were vetted for SELECT on the
+        // table when they subscribed.
+        json!({ "old_pk": change.pk })
+    } else {
+        match visible_row(pool, caller, change).await {
+            Ok(Some(record)) => json!({ "record": record }),
+            Ok(None) => return Vec::new(),
+            Err(e) => {
+                eprintln!("kilnbase-core: realtime visibility check failed: {e:?}");
+                return Vec::new();
+            }
+        }
+    };
+    ids.iter()
+        .map(|id| {
+            let mut event = json!({ "type": "change", "id": id, "event_id": change.id,
+                "table": change.table, "op": change.op });
+            if let (Value::Object(e), Value::Object(b)) = (&mut event, &body) {
+                e.extend(b.clone());
+            }
+            event
+        })
+        .collect()
+}
+
+/// Catch-up for a client resuming after `since`; asks it to refetch when the gap is unknowable.
+/// Events arriving live during the catch-up may be sent twice; clients dedupe by `event_id`.
+/// shortcut: a transaction that took an id below `since` but committed after it is not replayed;
+/// resume from a commit-ordered position (logical replication LSN) if that ever matters.
+async fn replay(pool: &Pool, caller: &Caller, id: &str, table: &str, since: i64) -> Vec<Value> {
+    let resync = json!({ "type": "error", "id": id, "code": "resync_required",
+        "message": "too many changes were missed; refetch the table" });
+    let (changes, oldest) = match load_events(pool, Some(table), since, REPLAY_LIMIT + 1).await {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("kilnbase-core: realtime resume failed: {e:?}");
+            return vec![resync];
+        }
+    };
+    // Older events may have been pruned, or more happened than we replay: a refetch is the only
+    // way to be complete.
+    let pruned = oldest.is_some_and(|oldest| oldest > since + 1);
+    if pruned || changes.len() as i64 > REPLAY_LIMIT {
+        return vec![resync];
+    }
+    let owner = id.to_owned();
+    let mut out = Vec::new();
+    for change in &changes {
+        out.extend(render(pool, caller, change, &[&owner]).await);
+    }
+    out
 }
 
 async fn handle_client(
@@ -286,7 +458,7 @@ async fn handle_client(
             subs.remove(&id);
             json!({ "type": "unsubscribed", "id": id })
         }
-        ClientMessage::Subscribe { id, table } => {
+        ClientMessage::Subscribe { id, table, .. } => {
             let mut reply = subscribe(pool, caller, subs, &id, &table).await;
             // Echo the id on errors too, so clients can tell which subscription failed.
             reply["id"] = Value::String(id);
@@ -405,6 +577,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seen_ids_deduplicate_and_track_the_newest() {
+        let mut seen = Seen::default();
+        assert!(seen.insert(5));
+        assert!(seen.insert(3));
+        assert!(!seen.insert(5));
+        assert_eq!(seen.newest, Some(5));
+        for id in 10..(10 + Seen::CAPACITY as i64) {
+            seen.insert(id);
+        }
+        // The oldest ids are forgotten once capacity is exceeded, bounding memory.
+        assert!(seen.insert(5));
+        assert_eq!(seen.ids.len(), Seen::CAPACITY);
+    }
+
+    #[test]
     fn quotes_identifiers() {
         assert_eq!(quote_ident("todos"), "\"todos\"");
         assert_eq!(
@@ -416,7 +603,7 @@ mod tests {
     #[test]
     fn parses_trigger_payload() {
         let c: Change = serde_json::from_str(
-            r#"{"schema":"public","table":"todos","op":"INSERT","pk":{"id":5}}"#,
+            r#"{"id":1,"schema":"public","table":"todos","op":"INSERT","pk":{"id":5}}"#,
         )
         .unwrap();
         assert_eq!(c.table, "todos");
