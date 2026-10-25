@@ -60,6 +60,8 @@ class RecoverRequest(BaseModel):
 class PasswordChange(BaseModel):
     password: str = Field(max_length=1024)
     current_password: str | None = Field(default=None, max_length=1024)
+    # Only for anonymous users turning into permanent accounts.
+    email: str | None = Field(default=None, max_length=254)
 
 
 class RefreshRequest(BaseModel):
@@ -134,6 +136,7 @@ def user_json(row) -> dict:
     return {
         "id": str(row["id"]),
         "email": row["email"],
+        "is_anonymous": row.get("is_anonymous", False),
         "email_confirmed_at": confirmed and confirmed.isoformat(),
         "created_at": row["created_at"].isoformat(),
         "last_sign_in_at": row["last_sign_in_at"] and row["last_sign_in_at"].isoformat(),
@@ -163,6 +166,7 @@ def create_app(config: Config) -> FastAPI:
     otp_email_limiter = FailureLimiter(limit=5, window=3600)
     otp_ip_limiter = FailureLimiter(limit=config.mails_per_ip_hour, window=3600)
     mailer = Mailer(config.smtp_url, config.smtp_from)
+    anonymous_ip_limiter = FailureLimiter(limit=30, window=3600)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -193,7 +197,7 @@ def create_app(config: Config) -> FastAPI:
         )
         user = await conn.fetchrow(
             "update auth.users set last_sign_in_at = now() where id = $1"
-            " returning id, email, created_at, last_sign_in_at, email_confirmed_at",
+            " returning id, email, created_at, last_sign_in_at, email_confirmed_at, is_anonymous",
             user_id,
         )
         aal, recovery = await conn.fetchrow(
@@ -213,6 +217,7 @@ def create_app(config: Config) -> FastAPI:
             mfa_pending,
             email_verified=user["email_confirmed_at"] is not None,
             recovery=recovery,
+            is_anonymous=user["is_anonymous"],
         )
         return {
             "access_token": access_token,
@@ -256,6 +261,28 @@ def create_app(config: Config) -> FastAPI:
                 is None
             )
         return session | {"confirmation_sent": sent}
+
+    @app.post("/anonymous")
+    async def anonymous(request: Request):
+        """Creates a user without credentials; it can become permanent later via PUT /user."""
+        if not config.anonymous_sign_in:
+            return error(
+                403, "anonymous_disabled", "set KILNBASE_AUTH_ANONYMOUS=true to allow this"
+            )
+        key = client_ip(request)
+        if wait := anonymous_ip_limiter.retry_after(key):
+            return error(
+                429,
+                "too_many_requests",
+                "too many anonymous sign-ups",
+                headers={"Retry-After": str(wait)},
+            )
+        anonymous_ip_limiter.fail(key)
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            user_id = await conn.fetchval(
+                "insert into auth.users (is_anonymous) values (true) returning id"
+            )
+            return await issue_session(conn, user_id, None)
 
     @app.post("/token")
     async def token(request: Request, grant_type: str):
@@ -707,6 +734,8 @@ def create_app(config: Config) -> FastAPI:
             return error(
                 422, "weak_password", f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
+        if body.email is not None:
+            return await upgrade_anonymous(claims, body, request)
         async with app.state.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "select u.email, u.password_hash, s.recovery from auth.users u"
@@ -757,6 +786,33 @@ def create_app(config: Config) -> FastAPI:
                     row["email"],
                 )
         return Response(status_code=204)
+
+    async def upgrade_anonymous(claims: dict, body: PasswordChange, request: Request):
+        """Gives an anonymous user an email and password; the user id and its data are kept."""
+        if not claims.get("is_anonymous"):
+            return error(400, "email_change_unsupported", "changing the email is not supported yet")
+        email = normalize_email(body.email or "")
+        if email is None:
+            return error(422, "invalid_email", "email address is not valid")
+        password_hash = await run_in_threadpool(hasher.hash, body.password)
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            try:
+                await conn.execute(
+                    "update auth.users set email = $2, password_hash = $3, is_anonymous = false,"
+                    " updated_at = now() where id = $1::uuid and is_anonymous",
+                    claims["sub"],
+                    email,
+                    password_hash,
+                )
+            except asyncpg.UniqueViolationError:
+                return error(422, "email_taken", "a user with this email already exists")
+            session = await issue_session(
+                conn, uuid.UUID(claims["sub"]), email, uuid.UUID(claims["sid"])
+            )
+        sent = False
+        if config.smtp_url:
+            sent = await send_code(email, "confirm", None, False, client_ip(request)) is None
+        return session | {"confirmation_sent": sent}
 
     @app.post("/factors")
     async def enroll_factor(request: Request):

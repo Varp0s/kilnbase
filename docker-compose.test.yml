@@ -18,6 +18,7 @@ services:
       KILNBASE_SMTP_URL: smtp://mailpit:1025
       # Every e2e sign-up sends mail from one IP; the per-address limits are still exercised.
       KILNBASE_AUTH_MAILS_PER_IP_HOUR: "10000"
+      KILNBASE_AUTH_ANONYMOUS: "true"
       KILNBASE_OAUTH_MOCK_CLIENT_ID: mock-client
       KILNBASE_OAUTH_MOCK_CLIENT_SECRET: mock-secret
       # The browser (the test) reaches the provider on localhost; the auth service uses the network name.

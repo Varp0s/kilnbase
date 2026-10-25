@@ -29,6 +29,7 @@ class Config:
     smtp_url: str | None = None
     smtp_from: str = "Kilnbase <no-reply@localhost>"
     mails_per_ip_hour: int = 30
+    anonymous_sign_in: bool = False
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -79,6 +80,7 @@ def load(env: Mapping[str, str]) -> Config:
         raise ConfigError("KILNBASE_AUTH_MAILS_PER_IP_HOUR must be a positive number")
 
     return Config(
+        anonymous_sign_in=env.get("KILNBASE_AUTH_ANONYMOUS", "").strip().lower() == "true",
         mails_per_ip_hour=int(per_ip),
         smtp_url=smtp_url,
         smtp_from=env.get("KILNBASE_SMTP_FROM", "").strip() or "Kilnbase <no-reply@localhost>",

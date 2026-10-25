@@ -21,12 +21,13 @@ class Signer:
     def access_token(
         self,
         user_id: str,
-        email: str,
+        email: str | None,
         session_id: str,
         aal: str,
         mfa_pending: bool,
         email_verified: bool = False,
         recovery: bool = False,
+        is_anonymous: bool = False,
     ) -> tuple[str, int]:
         now = int(time.time())
         exp = now + ACCESS_TOKEN_LIFETIME
@@ -40,6 +41,7 @@ class Signer:
             # RLS can require a confirmed address: (auth.jwt() ->> 'email_verified')::boolean
             "email_verified": email_verified,
             "amr": ["recovery"] if recovery else [],
+            "is_anonymous": is_anonymous,
             "iat": now,
             "exp": exp,
         }

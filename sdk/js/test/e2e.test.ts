@@ -262,3 +262,16 @@ test("passwordless email code", async (t) => {
   const session = await c.auth.verifyOtp({ type: "email", email, token });
   assert.equal(session.data?.user.email, email);
 });
+
+test("anonymous user upgrades to a permanent account", async () => {
+  const c = client();
+  const guest = await c.auth.signInAnonymously();
+  assert.equal(guest.data?.user.is_anonymous, true);
+  const id = guest.data!.user.id;
+  const creds = credentials();
+  assert.equal((await c.auth.updateUser({ email: creds.email, password: creds.password })).error, null);
+  const user = (await c.auth.getUser()).data!;
+  assert.equal(user.is_anonymous, false);
+  const again = await client().auth.signInWithPassword(creds);
+  assert.equal(again.data?.user.id, id);
+});

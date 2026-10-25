@@ -117,6 +117,11 @@ mails a reset code/link; verifying it (`"type":"recovery"`) yields a session tha
 `PUT /auth/v1/user {"password"}` once without the current password. Ordinary sessions must send
 `current_password`. Any password change signs out every other session. A reset never bypasses MFA.
 
+**Anonymous users.** With `KILNBASE_AUTH_ANONYMOUS=true`, `POST /auth/v1/anonymous` creates a guest user (rate
+limited per IP) whose token carries `is_anonymous: true`, so policies can treat guests differently. Sending
+`PUT /auth/v1/user {"email", "password"}` later turns the guest into a permanent account with the same id and
+data. JS: `kb.auth.signInAnonymously()`, `kb.auth.updateUser({ email, password })`.
+
 **Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
 app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
 `"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is

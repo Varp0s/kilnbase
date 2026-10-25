@@ -32,6 +32,8 @@ services:
       KILNBASE_SMTP_FROM: ${KILNBASE_SMTP_FROM:-}
       # Emails (codes, links, confirmations) one client IP may trigger per hour.
       KILNBASE_AUTH_MAILS_PER_IP_HOUR: ${KILNBASE_AUTH_MAILS_PER_IP_HOUR:-30}
+      # Allow POST /auth/v1/anonymous (guest users that can later add an email and password).
+      KILNBASE_AUTH_ANONYMOUS: ${KILNBASE_AUTH_ANONYMOUS:-false}
       # A provider is enabled when its client ID is set.
       KILNBASE_OAUTH_GITHUB_CLIENT_ID: ${KILNBASE_OAUTH_GITHUB_CLIENT_ID:-}
       KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}

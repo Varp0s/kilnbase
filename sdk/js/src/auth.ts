@@ -2,7 +2,10 @@ import { type KilnbaseError, type Result, fail, isError, ok, request, toError } 
 
 export interface User {
   id: string;
-  email: string;
+  /** null for anonymous users until they add one. */
+  email: string | null;
+  is_anonymous: boolean;
+  email_confirmed_at: string | null;
   created_at: string;
   last_sign_in_at: string | null;
 }
@@ -69,6 +72,28 @@ export class AuthClient {
 
   signUp(credentials: Credentials): Promise<Result<Session>> {
     return this.#obtain("/auth/v1/signup", credentials, "SIGNED_IN");
+  }
+
+  /** A guest account (must be enabled on the server); keep it later with `updateUser({ email, password })`. */
+  signInAnonymously(): Promise<Result<Session>> {
+    return this.#obtain("/auth/v1/anonymous", {}, "SIGNED_IN");
+  }
+
+  /**
+   * Changes the password (send `currentPassword`, unless signed in through a password reset), or turns an
+   * anonymous user into a permanent one when `email` is given. Other sessions are signed out.
+   */
+  async updateUser(changes: { password: string; currentPassword?: string; email?: string }): Promise<Result<null>> {
+    const res = await this.#authed("/auth/v1/user", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: changes.password, current_password: changes.currentPassword, email: changes.email }),
+    });
+    if ("error" in res) return { data: null, error: res.error };
+    if (!res.ok) return toError(res);
+    // An upgrade returns a fresh session (the anonymous flag is gone from the token).
+    if (res.status === 200) await this.#set((await res.json()) as Session, "TOKEN_REFRESHED");
+    return ok(null);
   }
 
   signInWithPassword(credentials: Credentials): Promise<Result<Session>> {
