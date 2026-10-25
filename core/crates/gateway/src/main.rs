@@ -73,6 +73,7 @@ async fn main() -> ExitCode {
         storage,
         realtime: hub,
     });
+    let cors = cors_layer(cfg.cors_origins.as_deref());
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/rest/v1/", any(rest))
@@ -95,6 +96,7 @@ async fn main() -> ExitCode {
                 .put(storage::upload)
                 .delete(storage::delete),
         )
+        .layer(cors)
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
@@ -162,6 +164,37 @@ async fn auth_service(
         .unwrap_or(path_and_query)
         .to_owned();
     proxy::forward(&st.http, &st.auth_url, &upstream_path, req).await
+}
+
+fn cors_layer(origins: Option<&[String]>) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderName, Method};
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+
+    let allow_origin = match origins {
+        None => AllowOrigin::any(),
+        Some(list) => AllowOrigin::list(list.iter().filter_map(|o| HeaderValue::from_str(o).ok())),
+    };
+    let headers = [
+        "apikey",
+        "authorization",
+        "content-type",
+        "prefer",
+        "range",
+        "accept-profile",
+        "content-profile",
+    ];
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers(headers.map(HeaderName::from_static))
+        .expose_headers(["content-range", "retry-after"].map(HeaderName::from_static))
+        .max_age(std::time::Duration::from_secs(3600))
 }
 
 async fn shutdown_signal() {

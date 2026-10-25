@@ -14,6 +14,8 @@ pub struct Config {
     pub storage_dir: std::path::PathBuf,
     pub storage_max_file_size: u64,
     pub storage_signing_key: String,
+    /// `None` means any origin.
+    pub cors_origins: Option<Vec<String>>,
     /// Verification keys by `kid`; the gateway never holds a signing key.
     pub keys: HashMap<String, DecodingKey>,
 }
@@ -60,6 +62,16 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     let storage_dir = get("KILNBASE_STORAGE_DIR")
         .unwrap_or_else(|| "/data".into())
         .into();
+    // Auth is header-based (no cookies), so allowing any origin cannot be used for CSRF.
+    let cors_origins = match get("KILNBASE_CORS_ORIGINS").as_deref().map(str::trim) {
+        None | Some("") | Some("*") => None,
+        Some(list) => Some(
+            list.split(',')
+                .map(|o| o.trim().trim_end_matches('/').to_owned())
+                .filter(|o| !o.is_empty())
+                .collect(),
+        ),
+    };
     let storage_max_file_size = match get("KILNBASE_STORAGE_MAX_FILE_SIZE") {
         None => 50 * 1024 * 1024,
         Some(v) => v
@@ -75,6 +87,7 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         storage_dir,
         storage_max_file_size,
         storage_signing_key,
+        cors_origins,
         keys,
     })
 }
@@ -137,6 +150,16 @@ aXh731/prgSjHJQkHEVDIcvpTjmqYxdgY4pcnn8l0k6u/TanBK5xyb2S
         assert_eq!(cfg.postgrest_url, "http://postgrest:3000");
         assert_eq!(cfg.storage_max_file_size, 50 * 1024 * 1024);
         assert!(cfg.keys.contains_key("test"));
+        assert!(cfg.cors_origins.is_none());
+        let cfg = load(valid(&[(
+            "KILNBASE_CORS_ORIGINS",
+            "https://app.example.com/, http://localhost:3000",
+        )]))
+        .unwrap();
+        assert_eq!(
+            cfg.cors_origins.unwrap(),
+            ["https://app.example.com", "http://localhost:3000"]
+        );
     }
 
     #[test]

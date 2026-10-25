@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kilnbase Todos</title>
+  <style>
+    :root { --bg: #faf8f5; --fg: #1d1b19; --muted: #6f6a64; --line: #e4dfd8; --accent: #b4532a; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1a1816; --fg: #f1ede8; --muted: #a39d96; --line: #34302c; --accent: #e07a4d; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 1.5rem; }
+    form { display: flex; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+    input[type=text], input[type=email], input[type=password] {
+      flex: 1 1 10rem; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem;
+      background: transparent; color: inherit; font: inherit;
+    }
+    button { padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: #fff;
+      font: inherit; cursor: pointer; }
+    button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; align-items: center; gap: .75rem; padding: .6rem 0; border-bottom: 1px solid var(--line); }
+    li span { flex: 1; }
+    li.done span { text-decoration: line-through; color: var(--muted); }
+    li button { padding: .25rem .6rem; }
+    .muted { color: var(--muted); font-size: .9rem; }
+    a { color: var(--accent); }
+    .error { color: var(--accent); min-height: 1.5em; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Todos</h1>
+
+  <section id="signed-out">
+    <form id="auth-form">
+      <input type="email" name="email" placeholder="email" required autocomplete="email">
+      <input type="password" name="password" placeholder="password (8+ chars)" required minlength="8"
+             autocomplete="current-password">
+      <button type="submit" name="mode" value="in">Sign in</button>
+      <button type="submit" name="mode" value="up" class="ghost">Sign up</button>
+    </form>
+  </section>
+
+  <section id="signed-in" hidden>
+    <p class="muted"><span id="who"></span> · <a href="#" id="sign-out">sign out</a></p>
+    <form id="add-form">
+      <input type="text" name="title" placeholder="What needs doing?" required maxlength="200" autocomplete="off">
+      <button type="submit">Add</button>
+    </form>
+    <ul id="list"></ul>
+    <p class="muted">Open this page in a second window: changes appear live.</p>
+  </section>
+
+  <p class="error" id="error" role="alert"></p>
+</main>
+
+<script type="module">
+  import { createClient } from "../../sdk/js/dist/index.js";
+
+  const params = new URLSearchParams(location.search);
+  const URL_ = params.get("url") ?? "http://localhost:8000";
+  const ANON_KEY = params.get("key") ?? localStorage.getItem("todo.anonKey") ?? prompt("Paste KILNBASE_ANON_KEY from .env");
+  if (ANON_KEY) localStorage.setItem("todo.anonKey", ANON_KEY);
+
+  const kb = createClient(URL_, ANON_KEY);
+  const $ = (id) => document.getElementById(id);
+  const todos = new Map();
+  let stopRealtime = null;
+
+  const showError = (error) => { $("error").textContent = error ? error.message : ""; };
+
+  function render() {
+    const list = $("list");
+    list.replaceChildren(...[...todos.values()].sort((a, b) => a.id - b.id).map((t) => {
+      const li = document.createElement("li");
+      li.className = t.done ? "done" : "";
+      const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: t.done });
+      box.onchange = async () => showError((await kb.from("todos").update({ done: box.checked }).eq("id", t.id)).error);
+      const title = Object.assign(document.createElement("span"), { textContent: t.title });
+      const del = Object.assign(document.createElement("button"), { textContent: "×", className: "ghost" });
+      del.setAttribute("aria-label", `Delete ${t.title}`);
+      del.onclick = async () => showError((await kb.from("todos").delete().eq("id", t.id)).error);
+      li.append(box, title, del);
+      return li;
+    }));
+  }
+
+  async function enter(session) {
+    $("signed-out").hidden = true;
+    $("signed-in").hidden = false;
+    $("who").textContent = session.user.email;
+    const { data, error } = await kb.from("todos").select().order("id");
+    showError(error);
+    todos.clear();
+    for (const t of data ?? []) todos.set(t.id, t);
+    render();
+    stopRealtime?.();
+    stopRealtime = kb.realtime.subscribe("todos", (change) => {
+      if (change.op === "DELETE") todos.delete(change.old_pk.id);
+      else todos.set(change.record.id, change.record);
+      render();
+    }, showError);
+  }
+
+  function leave() {
+    stopRealtime?.();
+    stopRealtime = null;
+    todos.clear();
+    $("signed-in").hidden = true;
+    $("signed-out").hidden = false;
+  }
+
+  $("auth-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const creds = { email: form.get("email"), password: form.get("password") };
+    const { data, error } = e.submitter.value === "up"
+      ? await kb.auth.signUp(creds)
+      : await kb.auth.signInWithPassword(creds);
+    showError(error);
+    if (data) enter(data);
+  };
+
+  $("add-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const input = e.target.title;
+    const { error } = await kb.from("todos").insert({ title: input.value });
+    showError(error);
+    if (!error) input.value = "";
+  };
+
+  $("sign-out").onclick = async (e) => {
+    e.preventDefault();
+    await kb.auth.signOut();
+    leave();
+  };
+
+  const session = await kb.auth.getSession();
+  if (session) enter(session);
+</script>
+</body>
+</html>

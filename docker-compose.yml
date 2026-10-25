@@ -58,6 +58,8 @@ services:
       KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
       KILNBASE_DATABASE_URL: postgres://authenticator:${KILNBASE_AUTHENTICATOR_PASSWORD}@db:5432/postgres
       KILNBASE_STORAGE_SIGNING_KEY: ${KILNBASE_STORAGE_SIGNING_KEY:?run `kilnbase init` first}
+      # Comma-separated list of allowed browser origins, or * for any.
+      KILNBASE_CORS_ORIGINS: ${KILNBASE_CORS_ORIGINS:-*}
     volumes:
       - storage-data:/data
     ports:
