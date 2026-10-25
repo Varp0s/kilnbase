@@ -209,3 +209,31 @@ test("MFA: enrolled users need a code before the API accepts them", async () => 
   assert.equal((await c.from("e2e_sdk").select()).error, null);
   assert.equal((await c.auth.mfa.unenroll(factor.id)).error, null);
 });
+
+test("OAuth: provider sign-in with PKCE", async (t) => {
+  const mock = "http://localhost:9100";
+  try {
+    await fetch(`${mock}/healthz`);
+  } catch {
+    t.skip("mock provider not running (docker-compose.test.yml)");
+    return;
+  }
+  const email = `sdk-oauth-${randomUUID().slice(0, 8)}@example.com`;
+  await fetch(`${mock}/next`, {
+    method: "POST",
+    body: JSON.stringify({ sub: randomUUID(), email, email_verified: true }),
+  });
+  const c = client();
+  const { url } = (await c.auth.signInWithOAuth("mock", { redirectTo: "http://localhost:3000/callback" })).data!;
+  // Follow the browser's redirects by hand: gateway -> provider -> gateway callback -> app.
+  let location = url;
+  for (let hop = 0; hop < 3; hop++) {
+    const res = await fetch(location, { redirect: "manual" });
+    location = new URL(res.headers.get("location")!, location).toString();
+  }
+  const code = new URL(location).searchParams.get("code")!;
+  const session = await c.auth.exchangeCodeForSession(code);
+  assert.equal(session.error, null);
+  assert.equal(session.data?.user.email, email);
+  assert.equal((await c.from("e2e_sdk").select()).error, null);
+});

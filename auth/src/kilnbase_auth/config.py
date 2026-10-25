@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 import jwt
 
+from .oauth import Provider, load_providers
+
 # Value shipped in .env.example; refusing it stops people from running with published secrets.
 PLACEHOLDER = "change-me"
 
@@ -21,6 +23,9 @@ class Config:
     authenticator_password: str
     migrations_dir: Path
     port: int
+    public_url: str = "http://localhost:8000"
+    redirect_urls: tuple[str, ...] = ()
+    providers: dict[str, Provider] | None = None
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -53,7 +58,19 @@ def load(env: Mapping[str, str]) -> Config:
     if not port_raw.isdigit() or not 0 < int(port_raw) < 65536:
         raise ConfigError(f"KILNBASE_AUTH_PORT is not a valid port: {port_raw}")
 
+    public_url = env.get("KILNBASE_PUBLIC_URL", "http://localhost:8000").rstrip("/")
+    redirect_urls = tuple(
+        u.strip() for u in env.get("KILNBASE_AUTH_REDIRECT_URLS", "").split(",") if u.strip()
+    )
+    try:
+        providers = load_providers(env)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
+
     return Config(
+        public_url=public_url,
+        redirect_urls=redirect_urls,
+        providers=providers,
         database_url=database_url,
         private_jwk=jwk,
         authenticator_password=authenticator_password,

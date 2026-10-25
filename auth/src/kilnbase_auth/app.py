@@ -1,19 +1,33 @@
+import hmac
+import re
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 
 import asyncpg
+import httpx2 as httpx
 import jwt
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Config
 from .mfa import matching_step
+from .oauth import (
+    CODE_LIFETIME,
+    STATE_LIFETIME,
+    authorize_redirect,
+    digest,
+    fetch_user,
+    new_secret,
+    pkce_challenge,
+    redirect_allowed,
+)
 from .ratelimit import FailureLimiter
 from .tokens import (
     ACCESS_TOKEN_LIFETIME,
@@ -33,6 +47,12 @@ class Credentials(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(max_length=256)
+
+
+class CodeExchange(BaseModel):
+    code: str = Field(max_length=256)
+    # RFC 7636: verifiers are 43-128 characters.
+    code_verifier: str = Field(min_length=43, max_length=128)
 
 
 class CodeRequest(BaseModel):
@@ -85,9 +105,11 @@ def create_app(config: Config) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=10)
+        app.state.http = httpx.AsyncClient(timeout=10)
         try:
             yield
         finally:
+            await app.state.http.aclose()
             await app.state.pool.close()
 
     app = FastAPI(title="Kilnbase Auth", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -164,7 +186,13 @@ def create_app(config: Config) -> FastAPI:
             return await password_grant(request)
         if grant_type == "refresh_token":
             return await refresh_grant(request)
-        return error(400, "unsupported_grant_type", "grant_type must be password or refresh_token")
+        if grant_type == "authorization_code":
+            return await code_grant(request)
+        return error(
+            400,
+            "unsupported_grant_type",
+            "grant_type must be password, refresh_token or authorization_code",
+        )
 
     async def password_grant(request: Request):
         try:
@@ -190,11 +218,13 @@ def create_app(config: Config) -> FastAPI:
             )
             try:
                 ok = await run_in_threadpool(
-                    hasher.verify, row["password_hash"] if row else dummy_hash, body.password
+                    hasher.verify,
+                    (row and row["password_hash"]) or dummy_hash,
+                    body.password,
                 )
             except VerificationError, InvalidHashError:
                 ok = False
-            if not (row and ok):
+            if not (row and row["password_hash"] and ok):
                 for limiter, key in keys:
                     limiter.fail(key)
                 return error(400, "invalid_credentials", "invalid email or password")
@@ -246,6 +276,133 @@ def create_app(config: Config) -> FastAPI:
                 )
                 return error(401, "invalid_refresh_token", "refresh token is invalid or expired")
             return await issue_session(conn, row["user_id"], row["email"], row["session_id"])
+
+    providers = config.providers or {}
+    callback_url = f"{config.public_url}/auth/v1/callback"
+
+    @app.get("/authorize")
+    async def authorize(
+        provider: str, redirect_to: str, code_challenge: str, code_challenge_method: str = "S256"
+    ):
+        """Browser entry point for provider sign-in; reached without an API key."""
+        selected = providers.get(provider)
+        if selected is None:
+            return error(400, "unknown_provider", "this provider is not enabled")
+        if code_challenge_method != "S256" or not re.fullmatch(
+            r"[A-Za-z0-9_-]{43}", code_challenge
+        ):
+            return error(400, "invalid_request", "an S256 code_challenge is required")
+        if not redirect_allowed(redirect_to, [config.public_url, *config.redirect_urls]):
+            return error(400, "redirect_not_allowed", "add this URL to KILNBASE_AUTH_REDIRECT_URLS")
+        state, verifier = new_secret(), new_secret()
+        async with app.state.pool.acquire() as conn:
+            await conn.execute(
+                "delete from auth.oauth_states"
+                " where created_at < now() - make_interval(secs => $1)",
+                STATE_LIFETIME,
+            )
+            await conn.execute(
+                "insert into auth.oauth_states"
+                " (state_hash, provider, redirect_to, provider_verifier, client_challenge)"
+                " values ($1, $2, $3, $4, $5)",
+                digest(state),
+                provider,
+                redirect_to,
+                verifier,
+                code_challenge,
+            )
+        return RedirectResponse(authorize_redirect(selected, callback_url, state, verifier), 302)
+
+    @app.get("/callback")
+    async def callback(state: str = "", code: str = "", error_: str = Query("", alias="error")):
+        async with app.state.pool.acquire() as conn:
+            flow = await conn.fetchrow(
+                "delete from auth.oauth_states where state_hash = $1"
+                " and created_at > now() - make_interval(secs => $2) returning *",
+                digest(state),
+                STATE_LIFETIME,
+            )
+        if flow is None:
+            return error(400, "invalid_state", "sign-in link expired or was already used")
+        target = flow["redirect_to"]
+
+        def back(**params: str) -> RedirectResponse:
+            separator = "&" if "?" in target else "?"
+            return RedirectResponse(f"{target}{separator}{urlencode(params)}", 302)
+
+        if error_ or not code:
+            return back(error="access_denied")
+        try:
+            external = await fetch_user(
+                app.state.http,
+                providers[flow["provider"]],
+                code,
+                callback_url,
+                flow["provider_verifier"],
+            )
+        except httpx.HTTPError, KeyError, ValueError, TypeError:
+            return back(error="provider_error")
+
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            user_id = await conn.fetchval(
+                "select user_id from auth.identities where provider = $1 and provider_user_id = $2",
+                flow["provider"],
+                external.id,
+            )
+            if user_id is None:
+                # Only a provider-verified email may claim an account; otherwise anyone could
+                # register "victim@example.com" at a provider and take over the victim's account.
+                if not (external.email and external.email_verified):
+                    return back(error="email_not_verified")
+                user_id = await conn.fetchval(
+                    "select id from auth.users where lower(email) = $1", external.email
+                )
+                if user_id is None:
+                    user_id = await conn.fetchval(
+                        "insert into auth.users (email) values ($1) returning id", external.email
+                    )
+                await conn.execute(
+                    "insert into auth.identities (provider, provider_user_id, user_id, email)"
+                    " values ($1, $2, $3, $4)",
+                    flow["provider"],
+                    external.id,
+                    user_id,
+                    external.email,
+                )
+            one_time = new_secret()
+            await conn.execute(
+                "insert into auth.auth_codes (code_hash, user_id, client_challenge)"
+                " values ($1, $2, $3)",
+                digest(one_time),
+                user_id,
+                flow["client_challenge"],
+            )
+        return back(code=one_time)
+
+    async def code_grant(request: Request):
+        try:
+            body = CodeExchange.model_validate(await request.json())
+        except ValueError:
+            return error(
+                422, "invalid_request", "request body is missing fields or has invalid ones"
+            )
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            # Deleted on first presentation, so a wrong verifier also burns the code.
+            row = await conn.fetchrow(
+                "delete from auth.auth_codes where code_hash = $1"
+                " and created_at > now() - make_interval(secs => $2)"
+                " returning user_id, client_challenge",
+                digest(body.code),
+                CODE_LIFETIME,
+            )
+            if row is None or not hmac.compare_digest(
+                pkce_challenge(body.code_verifier), row["client_challenge"]
+            ):
+                return error(400, "invalid_grant", "code is invalid, expired or already used")
+            email = await conn.fetchval(
+                "select email from auth.users where id = $1", row["user_id"]
+            )
+            return await issue_session(conn, row["user_id"], email)
 
     async def current_session(request: Request) -> dict | None:
         token = bearer(request)

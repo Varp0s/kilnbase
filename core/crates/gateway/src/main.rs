@@ -150,7 +150,10 @@ async fn auth_service(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request,
 ) -> Response {
-    if let Err(e) = auth::check_api_key(&st.keys, req.headers()) {
+    // Provider sign-in starts and ends with browser navigations, which cannot carry headers.
+    let browser_redirect = req.method() == axum::http::Method::GET
+        && matches!(req.uri().path(), "/auth/v1/authorize" | "/auth/v1/callback");
+    if !browser_redirect && let Err(e) = auth::check_api_key(&st.keys, req.headers()) {
         return e.into_response();
     }
     req.headers_mut().remove("apikey");

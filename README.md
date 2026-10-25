@@ -88,6 +88,21 @@ curl -X POST localhost:8000/auth/v1/logout -H "apikey: $KILNBASE_ANON_KEY" -H "A
 - Refresh tokens are single-use. Presenting a used one again is treated as theft and ends the whole session.
 - Failed sign-ins are rate limited per email and per client IP.
 
+**Sign in with GitHub, Google or any OIDC provider.** Set `KILNBASE_OAUTH_GITHUB_CLIENT_ID` /
+`_CLIENT_SECRET` (or `GOOGLE`; other names also need `_AUTHORIZE_URL`, `_TOKEN_URL`, `_USERINFO_URL`), register
+`<KILNBASE_PUBLIC_URL>/auth/v1/callback` with the provider, and list your app in `KILNBASE_AUTH_REDIRECT_URLS`.
+
+```js
+const { data } = await kb.auth.signInWithOAuth("github", { redirectTo: "https://app.example.com/callback" });
+location.href = data.url;
+// on /callback:
+await kb.auth.exchangeCodeForSession(new URLSearchParams(location.search).get("code"));
+```
+
+The flow uses PKCE twice (with the provider, and between your app and Kilnbase), so tokens never travel in
+URLs and an intercepted code is useless. Redirects only go to allow-listed URLs, and a provider account is only
+linked to an existing user when the provider reports the email as verified.
+
 **Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
 app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
 `"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is
@@ -152,7 +167,9 @@ API keys are ES256 JWTs. `KILNBASE_ANON_KEY` is safe for clients; `KILNBASE_SERV
 
 ```sh
 uv sync && uv run pytest              # Python unit tests (auth, cli)
-KILNBASE_E2E=1 uv run pytest tests/e2e  # end-to-end, needs the stack running
+# end-to-end, needs the stack plus the test-only mock OAuth provider:
+docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+KILNBASE_E2E=1 uv run pytest tests/e2e
 cd core && cargo test                 # Rust (core)
 cd sdk/js && npm ci && npm test       # SDK unit tests; npm run test:e2e needs the stack
 ```

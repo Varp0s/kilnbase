@@ -47,11 +47,18 @@ const REFRESH_MARGIN = 60;
 
 const now = () => Math.floor(Date.now() / 1000);
 
+const base64url = (bytes: ArrayBuffer | Uint8Array) =>
+  btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
 export class AuthClient {
   #session: Session | null = null;
   #loaded = false;
   #refreshing: Promise<Result<Session>> | null = null;
   #listeners = new Set<AuthListener>();
+  #verifier: string | null = null;
 
   constructor(
     private readonly url: string,
@@ -66,6 +73,29 @@ export class AuthClient {
 
   signInWithPassword(credentials: Credentials): Promise<Result<Session>> {
     return this.#obtain("/auth/v1/token?grant_type=password", credentials, "SIGNED_IN");
+  }
+
+  /**
+   * Starts a provider sign-in. Send the browser to the returned URL; the provider sends it back to
+   * `redirectTo` with `?code=...`, which `exchangeCodeForSession` turns into a session. The PKCE
+   * verifier never leaves this client, so an intercepted code is useless.
+   */
+  async signInWithOAuth(provider: string, { redirectTo }: { redirectTo: string }): Promise<Result<{ url: string }>> {
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(48)));
+    const challenge = base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+    // Survives the full-page redirect when storage is available.
+    this.#verifier = verifier;
+    await this.storage?.setItem(`${this.storageKey}:pkce`, verifier);
+    const params = new URLSearchParams({ provider, redirect_to: redirectTo, code_challenge: challenge });
+    return ok({ url: `${this.url}/auth/v1/authorize?${params}` });
+  }
+
+  async exchangeCodeForSession(code: string): Promise<Result<Session>> {
+    const verifier = this.#verifier ?? (await this.storage?.getItem(`${this.storageKey}:pkce`)) ?? null;
+    if (!verifier) return fail(400, "missing_verifier", "call signInWithOAuth in this browser first");
+    this.#verifier = null;
+    await this.storage?.removeItem(`${this.storageKey}:pkce`);
+    return this.#obtain("/auth/v1/token?grant_type=authorization_code", { code, code_verifier: verifier }, "SIGNED_IN");
   }
 
   /** Ends the session on the server too, so its refresh token stops working everywhere. */
@@ -184,7 +214,7 @@ export class AuthClient {
     return ok(fresh);
   }
 
-  async #obtain(path: string, credentials: Credentials, event: AuthEvent): Promise<Result<Session>> {
+  async #obtain(path: string, credentials: object, event: AuthEvent): Promise<Result<Session>> {
     const res = await request(`${this.url}${path}`, {
       method: "POST",
       headers: { apikey: this.apiKey, "Content-Type": "application/json" },

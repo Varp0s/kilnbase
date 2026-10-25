@@ -1,0 +1,19 @@
+# Test-only additions: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+services:
+  oauth-mock:
+    image: python:3.15.1-slim-trixie
+    command: ["python", "/mock/oauth_mock.py"]
+    volumes:
+      - ./tests/oauth_mock.py:/mock/oauth_mock.py:ro
+    ports:
+      - "9100:9100"
+
+  auth:
+    environment:
+      KILNBASE_OAUTH_MOCK_CLIENT_ID: mock-client
+      KILNBASE_OAUTH_MOCK_CLIENT_SECRET: mock-secret
+      # The browser (the test) reaches the provider on localhost; the auth service uses the network name.
+      KILNBASE_OAUTH_MOCK_AUTHORIZE_URL: http://localhost:9100/authorize
+      KILNBASE_OAUTH_MOCK_TOKEN_URL: http://oauth-mock:9100/token
+      KILNBASE_OAUTH_MOCK_USERINFO_URL: http://oauth-mock:9100/userinfo
+      KILNBASE_AUTH_REDIRECT_URLS: http://localhost:3000

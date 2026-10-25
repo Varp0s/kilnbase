@@ -23,6 +23,15 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       KILNBASE_JWT_PRIVATE_JWK: ${KILNBASE_JWT_PRIVATE_JWK:?run `kilnbase init` first}
       KILNBASE_AUTHENTICATOR_PASSWORD: ${KILNBASE_AUTHENTICATOR_PASSWORD:?run `kilnbase init` first}
+      # Public address of the gateway; provider callbacks go to <this>/auth/v1/callback.
+      KILNBASE_PUBLIC_URL: ${KILNBASE_PUBLIC_URL:-http://localhost:8000}
+      # Comma-separated app URLs that sign-in may redirect back to.
+      KILNBASE_AUTH_REDIRECT_URLS: ${KILNBASE_AUTH_REDIRECT_URLS:-}
+      # A provider is enabled when its client ID is set.
+      KILNBASE_OAUTH_GITHUB_CLIENT_ID: ${KILNBASE_OAUTH_GITHUB_CLIENT_ID:-}
+      KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}
+      KILNBASE_OAUTH_GOOGLE_CLIENT_ID: ${KILNBASE_OAUTH_GOOGLE_CLIENT_ID:-}
+      KILNBASE_OAUTH_GOOGLE_CLIENT_SECRET: ${KILNBASE_OAUTH_GOOGLE_CLIENT_SECRET:-}
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
