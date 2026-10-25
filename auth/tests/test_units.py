@@ -16,9 +16,12 @@ def private_jwk() -> dict:
 
 def test_signer_round_trip_and_rejects_other_keys():
     signer = Signer(private_jwk())
-    token, _ = signer.access_token("00000000-0000-0000-0000-000000000001", "a@b.co", "sid-1")
+    token, _ = signer.access_token(
+        "00000000-0000-0000-0000-000000000001", "a@b.co", "sid-1", "aal1", False
+    )
     claims = signer.verify(token)
     assert claims["role"] == "authenticated"
+    assert claims["aal"] == "aal1"
     assert jwt.get_unverified_header(token)["kid"] == "k1"
 
     with pytest.raises(jwt.InvalidTokenError):
@@ -77,3 +80,27 @@ def test_failure_limiter_reset():
     assert limiter.retry_after("k") > 0
     limiter.reset("k")
     assert limiter.retry_after("k") == 0
+
+
+def test_pending_mfa_tokens_carry_a_non_api_role():
+    signer = Signer(private_jwk())
+    token, _ = signer.access_token("u", "a@b.co", "s", "aal1", True)
+    assert signer.verify(token)["role"] == "mfa_pending"
+
+
+def test_totp_steps_accept_drift_and_reject_replays():
+    import pyotp
+    from kilnbase_auth.mfa import matching_step
+
+    secret = pyotp.random_base32()
+    now = 1_800_000_000.0
+    step = int(now // 30)
+    totp = pyotp.TOTP(secret)
+    assert matching_step(secret, totp.at(now), 0, now) == step
+    assert matching_step(secret, totp.at(now - 30), 0, now) == step - 1
+    assert matching_step(secret, totp.at(now + 30), 0, now) == step + 1
+    assert matching_step(secret, totp.at(now - 60), 0, now) is None
+    # Once a step is used, it and every earlier step are spent.
+    assert matching_step(secret, totp.at(now), step, now) is None
+    assert matching_step(secret, totp.at(now - 30), step, now) is None
+    assert matching_step(secret, "000000" if totp.at(now) != "000000" else "111111", 0, now) is None

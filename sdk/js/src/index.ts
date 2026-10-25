@@ -3,7 +3,7 @@ import { RealtimeClient } from "./realtime.js";
 import { Query } from "./rest.js";
 import { StorageClient } from "./storage.js";
 
-export type { AuthEvent, AuthListener, Credentials, Session, StorageAdapter, User } from "./auth.js";
+export type { AuthEvent, AuthListener, Credentials, Factor, Session, StorageAdapter, User } from "./auth.js";
 export type { KilnbaseError, Result } from "./http.js";
 export type { ChangeEvent, RealtimeError } from "./realtime.js";
 export type { Query } from "./rest.js";

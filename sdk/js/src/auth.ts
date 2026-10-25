@@ -1,4 +1,4 @@
-import { type Result, fail, isError, ok, request, toError } from "./http.js";
+import { type KilnbaseError, type Result, fail, isError, ok, request, toError } from "./http.js";
 
 export interface User {
   id: string;
@@ -15,6 +15,16 @@ export interface Session {
   /** Unix seconds. */
   expires_at: number;
   user: User;
+  /** True when the user has MFA enrolled and this session still needs `mfa.verify()`. */
+  mfa_required: boolean;
+}
+
+export interface Factor {
+  id: string;
+  type: "totp";
+  /** Base32 secret and `otpauth://` URI to show as a QR code; only returned on enrolment. */
+  secret: string;
+  uri: string;
 }
 
 export interface Credentials {
@@ -101,6 +111,43 @@ export class AuthClient {
       this.#refreshing = null;
     });
     return this.#refreshing;
+  }
+
+  /** TOTP second factor. Once a factor is verified, sign-ins need `verify()` before the API accepts them. */
+  readonly mfa = {
+    enroll: async (): Promise<Result<Factor>> => {
+      const res = await this.#authed("/auth/v1/factors", { method: "POST" });
+      if ("error" in res) return { data: null, error: res.error };
+      return res.ok ? ok((await res.json()) as Factor) : toError(res);
+    },
+    /** Confirms an enrolment or completes a pending sign-in; the session is upgraded on success. */
+    verify: async (factorId: string, code: string): Promise<Result<Session>> => {
+      const res = await this.#authed(`/auth/v1/factors/${encodeURIComponent(factorId)}/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if ("error" in res) return { data: null, error: res.error };
+      if (!res.ok) return toError(res);
+      const session = (await res.json()) as Session;
+      await this.#set(session, "SIGNED_IN");
+      return ok(session);
+    },
+    unenroll: async (factorId: string): Promise<Result<null>> => {
+      const res = await this.#authed(`/auth/v1/factors/${encodeURIComponent(factorId)}`, { method: "DELETE" });
+      if ("error" in res) return { data: null, error: res.error };
+      return res.ok ? ok(null) : toError(res);
+    },
+  };
+
+  async #authed(path: string, init: RequestInit): Promise<Response | { error: KilnbaseError }> {
+    const session = await this.getSession();
+    if (!session) return { error: { status: 401, code: "not_signed_in", message: "no active session" } };
+    const res = await request(`${this.url}${path}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string>), apikey: this.apiKey, Authorization: `Bearer ${session.access_token}` },
+    });
+    return isError(res) ? { error: res } : res;
   }
 
   onAuthStateChange(listener: AuthListener): () => void {

@@ -20,6 +20,9 @@ First release candidate (planned as 0.1.0).
   decides who receives it. Protocol in `docs/realtime-protocol.md`.
 - **JS/TS client** (`kilnbase` on npm, no runtime dependencies): auth with cross-tab-safe refresh, query
   builder, storage and realtime.
+- **MFA (TOTP)**: enrolment, single-use codes with ±30 s drift, rate-limited verification; enrolled users'
+  password-only sessions get a token the APIs reject until the second factor is verified; refresh tokens issued
+  before the upgrade are revoked.
 - **CLI**: `kilnbase init` (keys and secrets) and `kilnbase doctor` (secret and database security audit).
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
 - **Migrations** are checksummed; edited or unknown applied migrations stop the auth service.

@@ -5,6 +5,8 @@ import time
 import jwt
 
 ACCESS_TOKEN_LIFETIME = 3600
+# "mfa_pending" is not an API role: the gateway rejects it everywhere except the auth service.
+USER_ROLES = ("authenticated", "mfa_pending")
 REFRESH_TOKEN_LIFETIME = 30 * 24 * 3600
 
 
@@ -16,15 +18,18 @@ class Signer:
         self._kid = private_jwk["kid"]
         self._public = self._jwk.key.public_key()
 
-    def access_token(self, user_id: str, email: str, session_id: str) -> tuple[str, int]:
+    def access_token(
+        self, user_id: str, email: str, session_id: str, aal: str, mfa_pending: bool
+    ) -> tuple[str, int]:
         now = int(time.time())
         exp = now + ACCESS_TOKEN_LIFETIME
         claims = {
             "iss": "kilnbase",
             "sub": user_id,
-            "role": "authenticated",
+            "role": "mfa_pending" if mfa_pending else "authenticated",
             "email": email,
             "sid": session_id,
+            "aal": aal,
             "iat": now,
             "exp": exp,
         }
@@ -41,7 +46,7 @@ class Signer:
             options={"require": ["exp", "sub", "sid"]},
             leeway=30,
         )
-        if claims.get("role") != "authenticated":
+        if claims.get("role") not in USER_ROLES:
             raise jwt.InvalidTokenError("not a user token")
         return claims
 

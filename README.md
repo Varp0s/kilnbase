@@ -88,6 +88,12 @@ curl -X POST localhost:8000/auth/v1/logout -H "apikey: $KILNBASE_ANON_KEY" -H "A
 - Refresh tokens are single-use. Presenting a used one again is treated as theft and ends the whole session.
 - Failed sign-ins are rate limited per email and per client IP.
 
+**Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
+app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
+`"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is
+enforced for every enrolled user without extra configuration. Codes are single-use and wrong codes are rate
+limited. In the JS client: `kb.auth.mfa.enroll()`, `kb.auth.mfa.verify(id, code)`, `kb.auth.mfa.unenroll(id)`.
+
 ### Storage
 
 ```sh

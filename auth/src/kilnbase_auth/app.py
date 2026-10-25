@@ -1,7 +1,9 @@
+import uuid
 from contextlib import asynccontextmanager
 
 import asyncpg
 import jwt
+import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from fastapi import FastAPI, Request
@@ -11,6 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Config
+from .mfa import matching_step
 from .ratelimit import FailureLimiter
 from .tokens import (
     ACCESS_TOKEN_LIFETIME,
@@ -30,6 +33,10 @@ class Credentials(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(max_length=256)
+
+
+class CodeRequest(BaseModel):
+    code: str = Field(pattern=r"^[0-9]{6}$")
 
 
 def error(status: int, code: str, message: str, headers: dict | None = None) -> JSONResponse:
@@ -72,6 +79,8 @@ def create_app(config: Config) -> FastAPI:
     dummy_hash = hasher.hash("timing-equaliser")
     email_limiter = FailureLimiter(limit=10, window=900)
     ip_limiter = FailureLimiter(limit=100, window=900)
+    # A 6-digit code has 10^6 values; 5 tries per 5 minutes keeps guessing hopeless.
+    code_limiter = FailureLimiter(limit=5, window=300)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -103,7 +112,16 @@ def create_app(config: Config) -> FastAPI:
             " returning id, email, created_at, last_sign_in_at",
             user_id,
         )
-        access_token, expires_at = signer.access_token(str(user_id), email, str(session_id))
+        aal = await conn.fetchval("select aal from auth.sessions where id = $1", session_id)
+        has_factor = await conn.fetchval(
+            "select exists (select 1 from auth.mfa_factors where user_id = $1 and verified)",
+            user_id,
+        )
+        # Enrolled users get an API-usable token only after proving the second factor.
+        mfa_pending = has_factor and aal != "aal2"
+        access_token, expires_at = signer.access_token(
+            str(user_id), email, str(session_id), aal, mfa_pending
+        )
         return {
             "access_token": access_token,
             "token_type": "bearer",
@@ -111,6 +129,7 @@ def create_app(config: Config) -> FastAPI:
             "expires_at": expires_at,
             "refresh_token": refresh_token,
             "user": user_json(user),
+            "mfa_required": mfa_pending,
         }
 
     @app.get("/health")
@@ -264,6 +283,101 @@ def create_app(config: Config) -> FastAPI:
         )
         if row is None:
             return error(401, "unauthorized", "a valid access token is required")
-        return user_json(row)
+        factors = await app.state.pool.fetch(
+            "select id, verified, created_at from auth.mfa_factors where user_id = $1 order by 3",
+            row["id"],
+        )
+        return user_json(row) | {
+            "factors": [
+                {"id": str(f["id"]), "type": "totp", "verified": f["verified"]} for f in factors
+            ]
+        }
+
+    @app.post("/factors")
+    async def enroll_factor(request: Request):
+        claims = await current_session(request)
+        if claims is None or claims["role"] != "authenticated":
+            return error(401, "unauthorized", "a fully signed-in session is required")
+        secret = pyotp.random_base32()
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            enrolled = await conn.fetchval(
+                "select exists (select 1 from auth.mfa_factors"
+                " where user_id = $1::uuid and verified)",
+                claims["sub"],
+            )
+            if enrolled:
+                return error(409, "mfa_already_enrolled", "remove the existing factor first")
+            # Abandoned enrolments are replaced rather than piling up.
+            await conn.execute(
+                "delete from auth.mfa_factors where user_id = $1::uuid and not verified",
+                claims["sub"],
+            )
+            factor_id = await conn.fetchval(
+                "insert into auth.mfa_factors (user_id, secret) values ($1::uuid, $2) returning id",
+                claims["sub"],
+                secret,
+            )
+        uri = pyotp.TOTP(secret).provisioning_uri(name=claims["email"], issuer_name="Kilnbase")
+        return {"id": str(factor_id), "type": "totp", "secret": secret, "uri": uri}
+
+    @app.post("/factors/{factor_id}/verify")
+    async def verify_factor(factor_id: uuid.UUID, body: CodeRequest, request: Request):
+        """Confirms an enrolment, or completes sign-in for an enrolled user; returns aal2 tokens."""
+        claims = await current_session(request)
+        if claims is None:
+            return error(401, "unauthorized", "a valid access token is required")
+        key = f"factor:{factor_id}"
+        if wait := code_limiter.retry_after(key):
+            return error(
+                429,
+                "too_many_attempts",
+                "too many wrong codes",
+                headers={"Retry-After": str(wait)},
+            )
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            factor = await conn.fetchrow(
+                "select secret, last_step from auth.mfa_factors"
+                " where id = $1 and user_id = $2::uuid for update",
+                factor_id,
+                claims["sub"],
+            )
+            if factor is None:
+                return error(404, "factor_not_found", "no such factor")
+            step = matching_step(factor["secret"], body.code, factor["last_step"])
+            if step is None:
+                code_limiter.fail(key)
+                return error(400, "invalid_code", "code is wrong, expired or already used")
+            code_limiter.reset(key)
+            await conn.execute(
+                "update auth.mfa_factors set verified = true, last_step = $2 where id = $1",
+                factor_id,
+                step,
+            )
+            await conn.execute(
+                "update auth.sessions set aal = 'aal2' where id = $1::uuid", claims["sid"]
+            )
+            # Refresh tokens minted before the upgrade must not inherit aal2.
+            await conn.execute(
+                "update auth.refresh_tokens set used_at = now()"
+                " where session_id = $1::uuid and used_at is null",
+                claims["sid"],
+            )
+            return await issue_session(
+                conn, uuid.UUID(claims["sub"]), claims["email"], uuid.UUID(claims["sid"])
+            )
+
+    @app.delete("/factors/{factor_id}")
+    async def remove_factor(factor_id: uuid.UUID, request: Request):
+        claims = await current_session(request)
+        if claims is None or claims.get("aal") != "aal2":
+            return error(403, "aal2_required", "verify your second factor before removing it")
+        deleted = await app.state.pool.fetchval(
+            "delete from auth.mfa_factors where id = $1 and user_id = $2::uuid returning id",
+            factor_id,
+            claims["sub"],
+        )
+        if deleted is None:
+            return error(404, "factor_not_found", "no such factor")
+        return Response(status_code=204)
 
     return app

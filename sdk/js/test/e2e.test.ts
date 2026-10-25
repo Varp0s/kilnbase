@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { before, test } from "node:test";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 import { createClient } from "../dist/index.js";
 
@@ -176,4 +176,36 @@ test("realtime delivers own inserts only", async () => {
   assert.equal(seenByA.length, 1);
   assert.equal((seenByA[0] as { record: { title: string } }).record.title, "live");
   assert.deepEqual(seenByB, []);
+});
+
+/** RFC 6238 TOTP (SHA-1, 6 digits, 30 s) for tests, without a dependency. */
+function totp(secretBase32: string, at = Date.now()): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const c of secretBase32.replace(/=+$/, "")) bits += alphabet.indexOf(c).toString(2).padStart(5, "0");
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(at / 1000 / 30)));
+  const h = createHmac("sha1", key).update(counter).digest();
+  const offset = h[h.length - 1]! & 0xf;
+  return String((h.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+test("MFA: enrolled users need a code before the API accepts them", async () => {
+  const c = client();
+  const creds = credentials();
+  await c.auth.signUp(creds);
+  const factor = (await c.auth.mfa.enroll()).data!;
+  // Distinct time steps, since each code is single-use.
+  const enrolled = await c.auth.mfa.verify(factor.id, totp(factor.secret, Date.now() - 30_000));
+  assert.equal(enrolled.error, null);
+
+  const pending = await c.auth.signInWithPassword(creds);
+  assert.equal(pending.data?.mfa_required, true);
+  assert.equal((await c.from("e2e_sdk").select()).error?.status, 401);
+
+  const done = await c.auth.mfa.verify(factor.id, totp(factor.secret));
+  assert.equal(done.data?.mfa_required, false);
+  assert.equal((await c.from("e2e_sdk").select()).error, null);
+  assert.equal((await c.auth.mfa.unenroll(factor.id)).error, null);
 });
