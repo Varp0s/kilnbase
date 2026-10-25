@@ -79,17 +79,3 @@ def test_upgrade_cannot_take_an_existing_email(client, keys):
         json={"email": email, "password": "another passphrase"},
     )
     assert r.json()["code"] == "email_taken"
-
-
-def test_regular_users_cannot_change_email_this_way(client, keys):
-    session = client.post(
-        "/auth/v1/signup",
-        headers=api(keys),
-        json={"email": f"reg-{uuid.uuid4().hex[:8]}@example.com", "password": "a long passphrase"},
-    ).json()
-    r = client.put(
-        "/auth/v1/user",
-        headers=api(keys, session["access_token"]),
-        json={"email": "new@example.com", "password": "a long passphrase"},
-    )
-    assert r.json()["code"] == "email_change_unsupported"

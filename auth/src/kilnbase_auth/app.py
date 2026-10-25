@@ -58,10 +58,13 @@ class RecoverRequest(BaseModel):
 
 
 class PasswordChange(BaseModel):
-    password: str = Field(max_length=1024)
+    password: str | None = Field(default=None, max_length=1024)
     current_password: str | None = Field(default=None, max_length=1024)
-    # Only for anonymous users turning into permanent accounts.
     email: str | None = Field(default=None, max_length=254)
+
+
+class EmailChangeVerify(BaseModel):
+    token: str = Field(pattern=r"^[0-9]{6}$")
 
 
 class RefreshRequest(BaseModel):
@@ -721,49 +724,66 @@ def create_app(config: Config) -> FastAPI:
             ]
         }
 
-    @app.put("/user")
-    async def change_password(body: PasswordChange, request: Request):
-        """Sets a new password. Needs the current one, unless this is a password-reset session.
+    async def check_current_password(row, current: str | None) -> JSONResponse | None:
+        """Re-authentication for sensitive changes; rate limited like sign-in."""
+        key = f"email:{row['email']}"
+        if wait := email_limiter.retry_after(key):
+            return error(
+                429,
+                "too_many_attempts",
+                "too many failed attempts",
+                headers={"Retry-After": str(wait)},
+            )
+        try:
+            ok = await run_in_threadpool(hasher.verify, row["password_hash"], current or "")
+        except VerificationError, InvalidHashError:
+            ok = False
+        if not ok:
+            email_limiter.fail(key)
+            return error(400, "invalid_credentials", "current password is wrong")
+        return None
 
-        Every other session of the user is signed out, since a password change often follows a leak.
+    async def own_row(conn, claims: dict):
+        return await conn.fetchrow(
+            "select u.email, u.password_hash, s.recovery from auth.users u"
+            " join auth.sessions s on s.user_id = u.id"
+            " where u.id = $1::uuid and s.id = $2::uuid",
+            claims["sub"],
+            claims["sid"],
+        )
+
+    @app.put("/user")
+    async def update_user(body: PasswordChange, request: Request):
+        """Changes the password or email, or turns an anonymous user into a permanent one.
+
+        Password changes need the current password unless this is a password-reset session, and sign
+        out every other session, since a password change often follows a leak.
         """
         claims = await current_session(request)
         if claims is None or claims["role"] != "authenticated":
             return error(401, "unauthorized", "a fully signed-in session is required")
-        if len(body.password) < MIN_PASSWORD_LENGTH:
+        if body.password is not None and len(body.password) < MIN_PASSWORD_LENGTH:
             return error(
                 422, "weak_password", f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
-        if body.email is not None:
+        if claims.get("is_anonymous"):
+            if body.email is None or body.password is None:
+                return error(422, "invalid_request", "anonymous users must set email and password")
             return await upgrade_anonymous(claims, body, request)
+        if body.email is not None:
+            if body.password is not None:
+                return error(422, "invalid_request", "change the email and password separately")
+            return await request_email_change(claims, body, request)
+        if body.password is None:
+            return error(422, "invalid_request", "nothing to change")
+
         async with app.state.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "select u.email, u.password_hash, s.recovery from auth.users u"
-                " join auth.sessions s on s.user_id = u.id"
-                " where u.id = $1::uuid and s.id = $2::uuid",
-                claims["sub"],
-                claims["sid"],
-            )
+            row = await own_row(conn, claims)
             if row is None:
                 return error(401, "unauthorized", "a valid access token is required")
             if not row["recovery"] and row["password_hash"]:
-                key = f"email:{row['email']}"
-                if wait := email_limiter.retry_after(key):
-                    return error(
-                        429,
-                        "too_many_attempts",
-                        "too many failed attempts",
-                        headers={"Retry-After": str(wait)},
-                    )
-                try:
-                    ok = await run_in_threadpool(
-                        hasher.verify, row["password_hash"], body.current_password or ""
-                    )
-                except VerificationError, InvalidHashError:
-                    ok = False
-                if not ok:
-                    email_limiter.fail(key)
-                    return error(400, "invalid_credentials", "current password is wrong")
+                if failed := await check_current_password(row, body.current_password):
+                    return failed
             new_hash = await run_in_threadpool(hasher.hash, body.password)
             async with conn.transaction():
                 await conn.execute(
@@ -787,10 +807,126 @@ def create_app(config: Config) -> FastAPI:
                 )
         return Response(status_code=204)
 
+    async def request_email_change(claims: dict, body: PasswordChange, request: Request):
+        """Mails a code to the new address and a heads-up to the old one; nothing changes yet."""
+        new_email = normalize_email(body.email or "")
+        if new_email is None:
+            return error(422, "invalid_email", "email address is not valid")
+        async with app.state.pool.acquire() as conn:
+            row = await own_row(conn, claims)
+            if row is None:
+                return error(401, "unauthorized", "a valid access token is required")
+            if new_email == row["email"]:
+                return error(400, "same_email", "that is already your email")
+            if row["password_hash"] and not row["recovery"]:
+                if failed := await check_current_password(row, body.current_password):
+                    return failed
+            taken = await conn.fetchval(
+                "select exists (select 1 from auth.users where lower(email) = $1)", new_email
+            )
+            if taken:
+                return error(422, "email_taken", "a user with this email already exists")
+            for limiter, key in (
+                (otp_email_limiter, f"otp:{new_email}"),
+                (otp_ip_limiter, client_ip(request)),
+            ):
+                if wait := limiter.retry_after(key):
+                    return error(
+                        429,
+                        "too_many_requests",
+                        "too many codes requested",
+                        headers={"Retry-After": str(wait)},
+                    )
+                limiter.fail(key)
+            code = f"{secrets.randbelow(10**6):06d}"
+            await conn.execute(
+                "insert into auth.email_changes (user_id, new_email, code_hash)"
+                " values ($1::uuid, $2, $3) on conflict (user_id) do update"
+                " set new_email = excluded.new_email, code_hash = excluded.code_hash,"
+                " attempts = 0, created_at = now()",
+                claims["sub"],
+                new_email,
+                digest(f"{claims['sub']}:{new_email}:{code}"),
+            )
+        try:
+            await run_in_threadpool(
+                mailer.send,
+                new_email,
+                "Confirm your new email",
+                f"Your code to confirm this address is {code}. "
+                f"It expires in {OTP_LIFETIME // 60} minutes.\n",
+            )
+        except (OSError, smtplib.SMTPException) as e:
+            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
+            await app.state.pool.execute(
+                "delete from auth.email_changes where user_id = $1::uuid", claims["sub"]
+            )
+            return error(503, "mail_unavailable", "could not send the email, try again later")
+        # Best effort: lets the real owner react if someone else is taking over the account.
+        try:
+            await run_in_threadpool(
+                mailer.send,
+                row["email"],
+                "Your email is being changed",
+                f"Someone asked to change this account's email to {new_email}.\n"
+                "If that was not you, reset your password now.\n",
+            )
+        except (OSError, smtplib.SMTPException) as e:
+            print(f"kilnbase-auth: sending notice failed: {e}", file=sys.stderr)
+        return JSONResponse({"email_change_sent": True}, status_code=202)
+
+    @app.post("/user/email/verify")
+    async def confirm_email_change(body: EmailChangeVerify, request: Request):
+        claims = await current_session(request)
+        if claims is None or claims["role"] != "authenticated":
+            return error(401, "unauthorized", "a fully signed-in session is required")
+        invalid = error(400, "invalid_otp", "code is wrong, expired or already used")
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select new_email, code_hash, attempts,"
+                " created_at > now() - make_interval(secs => $2) as fresh"
+                " from auth.email_changes where user_id = $1::uuid for update",
+                claims["sub"],
+                OTP_LIFETIME,
+            )
+            if row is None:
+                return invalid
+            expected = digest(f"{claims['sub']}:{row['new_email']}:{body.token}")
+            if not (
+                row["fresh"]
+                and row["attempts"] < OTP_MAX_ATTEMPTS
+                and hmac.compare_digest(expected, row["code_hash"])
+            ):
+                await conn.execute(
+                    "update auth.email_changes set attempts = attempts + 1"
+                    " where user_id = $1::uuid",
+                    claims["sub"],
+                )
+                return invalid
+            await conn.execute(
+                "delete from auth.email_changes where user_id = $1::uuid", claims["sub"]
+            )
+            try:
+                await conn.execute(
+                    "update auth.users set email = $2, email_confirmed_at = now(),"
+                    " updated_at = now() where id = $1::uuid",
+                    claims["sub"],
+                    row["new_email"],
+                )
+            except asyncpg.UniqueViolationError:
+                return error(422, "email_taken", "a user with this email already exists")
+            await conn.execute(
+                "update auth.sessions set revoked_at = now()"
+                " where user_id = $1::uuid and id <> $2::uuid and revoked_at is null",
+                claims["sub"],
+                claims["sid"],
+            )
+            return await issue_session(
+                conn, uuid.UUID(claims["sub"]), row["new_email"], uuid.UUID(claims["sid"])
+            )
+
     async def upgrade_anonymous(claims: dict, body: PasswordChange, request: Request):
         """Gives an anonymous user an email and password; the user id and its data are kept."""
-        if not claims.get("is_anonymous"):
-            return error(400, "email_change_unsupported", "changing the email is not supported yet")
         email = normalize_email(body.email or "")
         if email is None:
             return error(422, "invalid_email", "email address is not valid")

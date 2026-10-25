@@ -117,6 +117,10 @@ mails a reset code/link; verifying it (`"type":"recovery"`) yields a session tha
 `PUT /auth/v1/user {"password"}` once without the current password. Ordinary sessions must send
 `current_password`. Any password change signs out every other session. A reset never bypasses MFA.
 
+**Changing the email.** `PUT /auth/v1/user {"email", "current_password"}` mails a code to the new address and a
+heads-up to the old one; `POST /auth/v1/user/email/verify {"token"}` from the same user's session applies it and
+signs out every other session.
+
 **Anonymous users.** With `KILNBASE_AUTH_ANONYMOUS=true`, `POST /auth/v1/anonymous` creates a guest user (rate
 limited per IP) whose token carries `is_anonymous: true`, so policies can treat guests differently. Sending
 `PUT /auth/v1/user {"email", "password"}` later turns the guest into a permanent account with the same id and
@@ -145,6 +149,10 @@ curl localhost:8000/storage/v1/object/avatars/ada/me.png -H "apikey: $KILNBASE_A
 curl -X POST localhost:8000/storage/v1/object/sign/avatars/ada/me.png -H "apikey: $KILNBASE_ANON_KEY" \
   -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" -d '{"expires_in":3600}'
 ```
+
+Large files can be uploaded resumably with any [tus 1.0](https://tus.io/protocols/resumable-upload) client:
+endpoint `/storage/v1/upload/resumable`, metadata `bucketName`, `objectName` and `contentType`, plus the usual
+`apikey` and `Authorization` headers. Unfinished uploads are deleted after 24 hours.
 
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
 
