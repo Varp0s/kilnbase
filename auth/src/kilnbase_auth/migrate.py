@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import asyncpg
@@ -6,12 +7,38 @@ import asyncpg
 LOCK_ID = 7_340_001
 
 
+class MigrationError(RuntimeError):
+    pass
+
+
 def load(migrations_dir: Path) -> list[tuple[str, str]]:
     """Return (version, sql) pairs in filename order."""
     files = sorted(migrations_dir.glob("*.sql"))
     if not files:
-        raise RuntimeError(f"no migrations found in {migrations_dir}")
+        raise MigrationError(f"no migrations found in {migrations_dir}")
     return [(f.stem, f.read_text(encoding="utf-8")) for f in files]
+
+
+def checksum(sql: str) -> str:
+    # Line endings are normalised so a Windows checkout does not look like a tampered file.
+    return hashlib.sha256(sql.replace("\r\n", "\n").encode()).hexdigest()
+
+
+def verify(applied: dict[str, str | None], migrations: list[tuple[str, str]]) -> None:
+    """Refuse to run against a database whose history disagrees with the shipped migrations."""
+    known = dict(migrations)
+    unknown = sorted(set(applied) - set(known))
+    if unknown:
+        raise MigrationError(
+            f"database has migrations this build does not know ({', '.join(unknown)}); "
+            "it was created by a newer version — upgrade instead of downgrading"
+        )
+    changed = [v for v, digest in applied.items() if digest and digest != checksum(known[v])]
+    if changed:
+        raise MigrationError(
+            f"already-applied migrations were modified ({', '.join(sorted(changed))}); "
+            "never edit an applied migration — add a new one"
+        )
 
 
 async def run(
@@ -25,19 +52,30 @@ async def run(
             "create schema if not exists kilnbase;"
             "create table if not exists kilnbase.schema_migrations ("
             " version text primary key,"
-            " applied_at timestamptz not null default now())"
+            " applied_at timestamptz not null default now());"
+            "alter table kilnbase.schema_migrations add column if not exists checksum text"
         )
-        rows = await conn.fetch("select version from kilnbase.schema_migrations")
-        applied = {r["version"] for r in rows}
+        rows = await conn.fetch("select version, checksum from kilnbase.schema_migrations")
+        applied = {r["version"]: r["checksum"] for r in rows}
+        verify(applied, migrations)
 
         newly_applied = []
         for version, sql in migrations:
             if version in applied:
+                if applied[version] is None:
+                    # Rows from before checksums existed: record what is applied now.
+                    await conn.execute(
+                        "update kilnbase.schema_migrations set checksum = $2 where version = $1",
+                        version,
+                        checksum(sql),
+                    )
                 continue
             async with conn.transaction():
                 await conn.execute(sql)
                 await conn.execute(
-                    "insert into kilnbase.schema_migrations (version) values ($1)", version
+                    "insert into kilnbase.schema_migrations (version, checksum) values ($1, $2)",
+                    version,
+                    checksum(sql),
                 )
             newly_applied.append(version)
 
