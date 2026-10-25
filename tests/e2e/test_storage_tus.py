@@ -26,7 +26,11 @@ def buckets(client, keys):
 
 
 def h(keys, token, **extra):
-    return {"apikey": keys.anon, "Authorization": f"Bearer {token}", "Tus-Resumable": "1.0.0"} | extra
+    return {
+        "apikey": keys.anon,
+        "Authorization": f"Bearer {token}",
+        "Tus-Resumable": "1.0.0",
+    } | extra
 
 
 def metadata(**fields):
