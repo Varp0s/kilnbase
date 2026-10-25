@@ -30,6 +30,8 @@ services:
       # Passwordless sign-in mail; without it codes are printed to the auth log (development only).
       KILNBASE_SMTP_URL: ${KILNBASE_SMTP_URL:-}
       KILNBASE_SMTP_FROM: ${KILNBASE_SMTP_FROM:-}
+      # Emails (codes, links, confirmations) one client IP may trigger per hour.
+      KILNBASE_AUTH_MAILS_PER_IP_HOUR: ${KILNBASE_AUTH_MAILS_PER_IP_HOUR:-30}
       # A provider is enabled when its client ID is set.
       KILNBASE_OAUTH_GITHUB_CLIENT_ID: ${KILNBASE_OAUTH_GITHUB_CLIENT_ID:-}
       KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}

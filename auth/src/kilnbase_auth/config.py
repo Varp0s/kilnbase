@@ -28,6 +28,7 @@ class Config:
     providers: dict[str, Provider] | None = None
     smtp_url: str | None = None
     smtp_from: str = "Kilnbase <no-reply@localhost>"
+    mails_per_ip_hour: int = 30
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -73,7 +74,12 @@ def load(env: Mapping[str, str]) -> Config:
     if smtp_url and not smtp_url.startswith(("smtp://", "smtps://")):
         raise ConfigError("KILNBASE_SMTP_URL must start with smtp:// or smtps://")
 
+    per_ip = env.get("KILNBASE_AUTH_MAILS_PER_IP_HOUR", "30")
+    if not per_ip.isdigit() or int(per_ip) < 1:
+        raise ConfigError("KILNBASE_AUTH_MAILS_PER_IP_HOUR must be a positive number")
+
     return Config(
+        mails_per_ip_hour=int(per_ip),
         smtp_url=smtp_url,
         smtp_from=env.get("KILNBASE_SMTP_FROM", "").strip() or "Kilnbase <no-reply@localhost>",
         public_url=public_url,

@@ -48,6 +48,18 @@ MIN_PASSWORD_LENGTH = 8
 class Credentials(BaseModel):
     email: str = Field(max_length=254)
     password: str = Field(max_length=1024)
+    # Sign-up only: where the confirmation link should lead.
+    redirect_to: str | None = Field(default=None, max_length=2048)
+
+
+class RecoverRequest(BaseModel):
+    email: str = Field(max_length=254)
+    redirect_to: str | None = Field(default=None, max_length=2048)
+
+
+class PasswordChange(BaseModel):
+    password: str = Field(max_length=1024)
+    current_password: str | None = Field(default=None, max_length=1024)
 
 
 class RefreshRequest(BaseModel):
@@ -67,13 +79,36 @@ class OtpRequest(BaseModel):
 
 
 class VerifyRequest(BaseModel):
-    type: Literal["email", "magiclink"]
+    type: Literal["email", "magiclink", "signup", "recovery"]
     email: str | None = Field(default=None, max_length=254)
     token: str = Field(max_length=256)
 
 
 OTP_LIFETIME = 600
 OTP_MAX_ATTEMPTS = 5
+
+# purpose -> (subject, sentence before the code, sentence before the link, link `type`)
+MAIL_TEXT = {
+    "signin": (
+        "Your sign-in code",
+        "Your sign-in code is",
+        "Or sign in with this link:",
+        "magiclink",
+    ),
+    "confirm": ("Confirm your email", "Your confirmation code is", "Or confirm here:", "signup"),
+    "recovery": (
+        "Reset your password",
+        "Your password reset code is",
+        "Or reset it here:",
+        "recovery",
+    ),
+}
+VERIFY_PURPOSE = {
+    "email": "signin",
+    "magiclink": "signin",
+    "signup": "confirm",
+    "recovery": "recovery",
+}
 
 
 class CodeRequest(BaseModel):
@@ -95,9 +130,11 @@ def normalize_email(raw: str) -> str | None:
 
 
 def user_json(row) -> dict:
+    confirmed = row.get("email_confirmed_at")
     return {
         "id": str(row["id"]),
         "email": row["email"],
+        "email_confirmed_at": confirmed and confirmed.isoformat(),
         "created_at": row["created_at"].isoformat(),
         "last_sign_in_at": row["last_sign_in_at"] and row["last_sign_in_at"].isoformat(),
     }
@@ -124,7 +161,7 @@ def create_app(config: Config) -> FastAPI:
     code_limiter = FailureLimiter(limit=5, window=300)
     # Every send counts: caps mail bombing of one address and bulk sending from one client.
     otp_email_limiter = FailureLimiter(limit=5, window=3600)
-    otp_ip_limiter = FailureLimiter(limit=30, window=3600)
+    otp_ip_limiter = FailureLimiter(limit=config.mails_per_ip_hour, window=3600)
     mailer = Mailer(config.smtp_url, config.smtp_from)
 
     @asynccontextmanager
@@ -156,10 +193,12 @@ def create_app(config: Config) -> FastAPI:
         )
         user = await conn.fetchrow(
             "update auth.users set last_sign_in_at = now() where id = $1"
-            " returning id, email, created_at, last_sign_in_at",
+            " returning id, email, created_at, last_sign_in_at, email_confirmed_at",
             user_id,
         )
-        aal = await conn.fetchval("select aal from auth.sessions where id = $1", session_id)
+        aal, recovery = await conn.fetchrow(
+            "select aal, recovery from auth.sessions where id = $1", session_id
+        )
         has_factor = await conn.fetchval(
             "select exists (select 1 from auth.mfa_factors where user_id = $1 and verified)",
             user_id,
@@ -167,7 +206,13 @@ def create_app(config: Config) -> FastAPI:
         # Enrolled users get an API-usable token only after proving the second factor.
         mfa_pending = has_factor and aal != "aal2"
         access_token, expires_at = signer.access_token(
-            str(user_id), email, str(session_id), aal, mfa_pending
+            str(user_id),
+            email,
+            str(session_id),
+            aal,
+            mfa_pending,
+            email_verified=user["email_confirmed_at"] is not None,
+            recovery=recovery,
         )
         return {
             "access_token": access_token,
@@ -184,7 +229,7 @@ def create_app(config: Config) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/signup")
-    async def signup(body: Credentials):
+    async def signup(body: Credentials, request: Request):
         email = normalize_email(body.email)
         if email is None:
             return error(422, "invalid_email", "email address is not valid")
@@ -203,7 +248,14 @@ def create_app(config: Config) -> FastAPI:
                 )
             except asyncpg.UniqueViolationError:
                 return error(422, "email_taken", "a user with this email already exists")
-            return await issue_session(conn, user_id, email)
+            session = await issue_session(conn, user_id, email)
+        sent = False
+        if config.smtp_url and (body.redirect_to is None or redirect_ok(body.redirect_to)):
+            sent = (
+                await send_code(email, "confirm", body.redirect_to, False, client_ip(request))
+                is None
+            )
+        return session | {"confirmation_sent": sent}
 
     @app.post("/token")
     async def token(request: Request, grant_type: str):
@@ -384,7 +436,9 @@ def create_app(config: Config) -> FastAPI:
                 )
                 if user_id is None:
                     user_id = await conn.fetchval(
-                        "insert into auth.users (email) values ($1) returning id", external.email
+                        "insert into auth.users (email, email_confirmed_at) values ($1, now())"
+                        " returning id",
+                        external.email,
                     )
                 await conn.execute(
                     "insert into auth.identities (provider, provider_user_id, user_id, email)"
@@ -429,6 +483,56 @@ def create_app(config: Config) -> FastAPI:
             )
             return await issue_session(conn, row["user_id"], email)
 
+    def redirect_ok(url: str) -> bool:
+        return redirect_allowed(url, [config.public_url, *config.redirect_urls])
+
+    async def send_code(
+        email: str, purpose: str, redirect_to: str | None, create_user: bool, ip: str | None
+    ) -> JSONResponse | None:
+        """Stores a fresh code + link for (email, purpose) and mails them; None on success."""
+        keys = [(otp_email_limiter, f"otp:{email}")]
+        if ip is not None:
+            keys.append((otp_ip_limiter, ip))
+        for limiter, key in keys:
+            if wait := limiter.retry_after(key):
+                return error(
+                    429,
+                    "too_many_requests",
+                    "too many codes requested",
+                    headers={"Retry-After": str(wait)},
+                )
+            limiter.fail(key)
+        code = f"{secrets.randbelow(10**6):06d}"
+        link = new_secret()
+        await app.state.pool.execute(
+            "insert into auth.one_time_tokens (email, purpose, code_hash, link_hash, create_user)"
+            " values ($1, $2, $3, $4, $5)"
+            " on conflict (email, purpose) do update set code_hash = excluded.code_hash,"
+            " link_hash = excluded.link_hash, create_user = excluded.create_user,"
+            " attempts = 0, created_at = now()",
+            email,
+            purpose,
+            digest(f"{email}:{purpose}:{code}"),
+            digest(link),
+            create_user,
+        )
+        subject, code_line, link_line, link_type = MAIL_TEXT[purpose]
+        text = f"{code_line} {code}. It expires in {OTP_LIFETIME // 60} minutes.\n"
+        if redirect_to:
+            separator = "&" if "?" in redirect_to else "?"
+            query = urlencode({"type": link_type, "token": link})
+            text += f"\n{link_line}\n{redirect_to}{separator}{query}\n"
+        text += "\nIf you did not ask for this, you can ignore this email.\n"
+        try:
+            await run_in_threadpool(mailer.send, email, subject, text)
+        except (OSError, smtplib.SMTPException) as e:
+            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
+            await app.state.pool.execute(
+                "delete from auth.one_time_tokens where email = $1 and purpose = $2", email, purpose
+            )
+            return error(503, "mail_unavailable", "could not send the email, try again later")
+        return None
+
     @app.post("/otp")
     async def request_otp(body: OtpRequest, request: Request):
         """Emails a 6-digit code (and a magic link when redirect_to is given).
@@ -438,91 +542,83 @@ def create_app(config: Config) -> FastAPI:
         email = normalize_email(body.email)
         if email is None:
             return error(422, "invalid_email", "email address is not valid")
-        allowed = [config.public_url, *config.redirect_urls]
-        if body.redirect_to and not redirect_allowed(body.redirect_to, allowed):
+        if body.redirect_to and not redirect_ok(body.redirect_to):
             return error(400, "redirect_not_allowed", "add this URL to KILNBASE_AUTH_REDIRECT_URLS")
-        for limiter, key in (
-            (otp_email_limiter, f"otp:{email}"),
-            (otp_ip_limiter, client_ip(request)),
-        ):
-            if wait := limiter.retry_after(key):
-                return error(
-                    429,
-                    "too_many_requests",
-                    "too many codes requested",
-                    headers={"Retry-After": str(wait)},
-                )
-            limiter.fail(key)
-
-        async with app.state.pool.acquire() as conn:
-            exists = await conn.fetchval(
+        if not body.create_user:
+            exists = await app.state.pool.fetchval(
                 "select exists (select 1 from auth.users where lower(email) = $1)", email
             )
-            if not exists and not body.create_user:
+            if not exists:
                 return {"sent": True}
-            code = f"{secrets.randbelow(10**6):06d}"
-            link = new_secret()
-            await conn.execute(
-                "insert into auth.one_time_tokens (email, code_hash, link_hash, create_user)"
-                " values ($1, $2, $3, $4)"
-                " on conflict (email) do update set code_hash = excluded.code_hash,"
-                " link_hash = excluded.link_hash, create_user = excluded.create_user,"
-                " attempts = 0, created_at = now()",
-                email,
-                digest(f"{email}:{code}"),
-                digest(link),
-                body.create_user,
-            )
-        text = f"Your sign-in code is {code}. It expires in {OTP_LIFETIME // 60} minutes.\n"
-        if body.redirect_to:
-            separator = "&" if "?" in body.redirect_to else "?"
-            magic = urlencode({"type": "magiclink", "token": link})
-            text += f"\nOr sign in with this link:\n{body.redirect_to}{separator}{magic}\n"
-        text += "\nIf you did not ask for this, you can ignore this email.\n"
-        try:
-            await run_in_threadpool(mailer.send, email, "Your sign-in code", text)
-        except (OSError, smtplib.SMTPException) as e:
-            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
-            await app.state.pool.execute("delete from auth.one_time_tokens where email = $1", email)
-            return error(503, "mail_unavailable", "could not send the email, try again later")
-        return {"sent": True}
+        failed = await send_code(
+            email, "signin", body.redirect_to, body.create_user, client_ip(request)
+        )
+        return failed or {"sent": True}
+
+    @app.post("/recover")
+    async def recover(body: RecoverRequest, request: Request):
+        """Starts a password reset; like /otp, the answer never reveals if an account exists."""
+        email = normalize_email(body.email)
+        if email is None:
+            return error(422, "invalid_email", "email address is not valid")
+        if body.redirect_to and not redirect_ok(body.redirect_to):
+            return error(400, "redirect_not_allowed", "add this URL to KILNBASE_AUTH_REDIRECT_URLS")
+        exists = await app.state.pool.fetchval(
+            "select exists (select 1 from auth.users where lower(email) = $1)", email
+        )
+        if not exists:
+            return {"sent": True}
+        failed = await send_code(email, "recovery", body.redirect_to, False, client_ip(request))
+        return failed or {"sent": True}
 
     @app.post("/verify")
     async def verify_otp(body: VerifyRequest):
         invalid = error(400, "invalid_otp", "code or link is wrong, expired or already used")
+        purpose = VERIFY_PURPOSE[body.type]
+        # "email" is always a code; "magiclink" always a link; the others accept either.
+        use_code = body.type == "email" or (body.type != "magiclink" and body.email is not None)
         async with app.state.pool.acquire() as conn, conn.transaction():
-            if body.type == "email":
+            if use_code:
                 email = normalize_email(body.email or "")
                 if email is None:
                     return invalid
                 row = await conn.fetchrow(
                     "select code_hash, create_user, attempts,"
-                    " created_at > now() - make_interval(secs => $2) as fresh"
-                    " from auth.one_time_tokens where email = $1 for update",
+                    " created_at > now() - make_interval(secs => $3) as fresh"
+                    " from auth.one_time_tokens where email = $1 and purpose = $2 for update",
                     email,
+                    purpose,
                     OTP_LIFETIME,
                 )
                 if row is None:
                     return invalid
+                expected = digest(f"{email}:{purpose}:{body.token}")
                 if not (
                     row["fresh"]
                     and row["attempts"] < OTP_MAX_ATTEMPTS
-                    and hmac.compare_digest(digest(f"{email}:{body.token}"), row["code_hash"])
+                    and hmac.compare_digest(expected, row["code_hash"])
                 ):
                     # Too many wrong tries kills the code, so 6 digits cannot be brute forced.
                     await conn.execute(
-                        "update auth.one_time_tokens set attempts = attempts + 1 where email = $1",
+                        "update auth.one_time_tokens set attempts = attempts + 1"
+                        " where email = $1 and purpose = $2",
                         email,
+                        purpose,
                     )
                     return invalid
-                await conn.execute("delete from auth.one_time_tokens where email = $1", email)
+                await conn.execute(
+                    "delete from auth.one_time_tokens where email = $1 and purpose = $2",
+                    email,
+                    purpose,
+                )
                 create_user = row["create_user"]
             else:
                 row = await conn.fetchrow(
-                    "delete from auth.one_time_tokens where link_hash = $1"
-                    " and created_at > now() - make_interval(secs => $2)"
+                    "delete from auth.one_time_tokens where link_hash = $1 and purpose = $2"
+                    " and created_at > now() - make_interval(secs => $3)"
                     " returning email, create_user",
                     digest(body.token),
+                    purpose,
                     OTP_LIFETIME,
                 )
                 if row is None:
@@ -538,7 +634,18 @@ def create_app(config: Config) -> FastAPI:
                 user_id = await conn.fetchval(
                     "insert into auth.users (email) values ($1) returning id", email
                 )
-            return await issue_session(conn, user_id, email)
+            # Receiving the code proves the address.
+            await conn.execute(
+                "update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now())"
+                " where id = $1",
+                user_id,
+            )
+            session_id = await conn.fetchval(
+                "insert into auth.sessions (user_id, recovery) values ($1, $2) returning id",
+                user_id,
+                purpose == "recovery",
+            )
+            return await issue_session(conn, user_id, email, session_id)
 
     async def current_session(request: Request) -> dict | None:
         token = bearer(request)
@@ -571,7 +678,8 @@ def create_app(config: Config) -> FastAPI:
         if claims is None:
             return error(401, "unauthorized", "a valid access token is required")
         row = await app.state.pool.fetchrow(
-            "select id, email, created_at, last_sign_in_at from auth.users where id = $1::uuid",
+            "select id, email, created_at, last_sign_in_at, email_confirmed_at"
+            " from auth.users where id = $1::uuid",
             claims["sub"],
         )
         if row is None:
@@ -585,6 +693,70 @@ def create_app(config: Config) -> FastAPI:
                 {"id": str(f["id"]), "type": "totp", "verified": f["verified"]} for f in factors
             ]
         }
+
+    @app.put("/user")
+    async def change_password(body: PasswordChange, request: Request):
+        """Sets a new password. Needs the current one, unless this is a password-reset session.
+
+        Every other session of the user is signed out, since a password change often follows a leak.
+        """
+        claims = await current_session(request)
+        if claims is None or claims["role"] != "authenticated":
+            return error(401, "unauthorized", "a fully signed-in session is required")
+        if len(body.password) < MIN_PASSWORD_LENGTH:
+            return error(
+                422, "weak_password", f"password must be at least {MIN_PASSWORD_LENGTH} characters"
+            )
+        async with app.state.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "select u.email, u.password_hash, s.recovery from auth.users u"
+                " join auth.sessions s on s.user_id = u.id"
+                " where u.id = $1::uuid and s.id = $2::uuid",
+                claims["sub"],
+                claims["sid"],
+            )
+            if row is None:
+                return error(401, "unauthorized", "a valid access token is required")
+            if not row["recovery"] and row["password_hash"]:
+                key = f"email:{row['email']}"
+                if wait := email_limiter.retry_after(key):
+                    return error(
+                        429,
+                        "too_many_attempts",
+                        "too many failed attempts",
+                        headers={"Retry-After": str(wait)},
+                    )
+                try:
+                    ok = await run_in_threadpool(
+                        hasher.verify, row["password_hash"], body.current_password or ""
+                    )
+                except VerificationError, InvalidHashError:
+                    ok = False
+                if not ok:
+                    email_limiter.fail(key)
+                    return error(400, "invalid_credentials", "current password is wrong")
+            new_hash = await run_in_threadpool(hasher.hash, body.password)
+            async with conn.transaction():
+                await conn.execute(
+                    "update auth.users set password_hash = $2, updated_at = now()"
+                    " where id = $1::uuid",
+                    claims["sub"],
+                    new_hash,
+                )
+                await conn.execute(
+                    "update auth.sessions set recovery = false where id = $1::uuid", claims["sid"]
+                )
+                await conn.execute(
+                    "update auth.sessions set revoked_at = now()"
+                    " where user_id = $1::uuid and id <> $2::uuid and revoked_at is null",
+                    claims["sub"],
+                    claims["sid"],
+                )
+                await conn.execute(
+                    "delete from auth.one_time_tokens where email = $1 and purpose = 'recovery'",
+                    row["email"],
+                )
+        return Response(status_code=204)
 
     @app.post("/factors")
     async def enroll_factor(request: Request):

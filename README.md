@@ -110,6 +110,13 @@ linked to an existing user when the provider reports the email as verified.
 exists. Set `KILNBASE_SMTP_URL` (`smtps://user:pass@host` or `smtp://` with STARTTLS); without it, mail is printed
 to the auth log for local development. JS: `kb.auth.signInWithOtp({ email })`, `kb.auth.verifyOtp(...)`.
 
+**Email confirmation and password reset.** With SMTP configured, password sign-ups get a confirmation mail
+(`POST /auth/v1/verify {"type":"signup", ...}`); access tokens carry `email_verified`, so a policy can require it:
+`using ((auth.jwt() ->> 'email_verified')::boolean and owner = auth.uid())`. `POST /auth/v1/recover {"email"}`
+mails a reset code/link; verifying it (`"type":"recovery"`) yields a session that may call
+`PUT /auth/v1/user {"password"}` once without the current password. Ordinary sessions must send
+`current_password`. Any password change signs out every other session. A reset never bypasses MFA.
+
 **Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
 app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
 `"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is
