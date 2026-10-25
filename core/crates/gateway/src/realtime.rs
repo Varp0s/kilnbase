@@ -15,6 +15,7 @@ use tokio_postgres::{AsyncMessage, NoTls};
 
 use crate::AppState;
 use crate::auth::{self, Caller};
+use crate::channels;
 use crate::db;
 
 const CHANNEL: &str = "kilnbase_realtime";
@@ -112,8 +113,35 @@ pub async fn websocket(
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Subscribe { id: String, table: String },
-    Unsubscribe { id: String },
+    Subscribe {
+        id: String,
+        table: String,
+    },
+    Unsubscribe {
+        id: String,
+    },
+    Join {
+        id: String,
+        channel: String,
+    },
+    Leave {
+        channel: String,
+    },
+    Broadcast {
+        channel: String,
+        event: String,
+        #[serde(default)]
+        payload: Value,
+        /// Also deliver to the sending connection.
+        #[serde(default, rename = "self")]
+        include_self: bool,
+    },
+    Presence {
+        channel: String,
+        /// null stops tracking.
+        #[serde(default)]
+        state: Option<Value>,
+    },
 }
 
 type Sink = SplitSink<WebSocket, Message>;
@@ -124,23 +152,75 @@ async fn send(sink: &mut Sink, value: Value) -> bool {
         .is_ok()
 }
 
+fn expired_message() -> Value {
+    json!({ "type": "error", "code": "token_expired",
+        "message": "access token expired; reconnect with a fresh one" })
+}
+
 async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
     let (mut sink, mut incoming) = socket.split();
     let mut changes = st.realtime.subscribe();
+    let mut channel_events = st.channels.subscribe();
+    let mut member = st.channels.member();
     // subscription id -> table name (always in schema `public`)
     let mut subs: HashMap<String, String> = HashMap::new();
+    let pool = &st.storage.pool;
 
-    loop {
+    'session: loop {
         tokio::select! {
             message = incoming.next() => {
                 let Some(Ok(message)) = message else { break };
-                let reply = match message {
-                    Message::Text(text) => handle_client(&st.storage.pool, &caller, &mut subs, &text).await,
+                let text = match message {
+                    Message::Text(text) => text,
                     Message::Close(_) => break,
                     _ => continue,
                 };
-                if !send(&mut sink, reply).await {
+                if caller.expired() {
+                    let _ = send(&mut sink, expired_message()).await;
                     break;
+                }
+                let replies = match serde_json::from_str::<ClientMessage>(&text) {
+                    Err(_) => vec![json!({ "type": "error", "code": "invalid_message",
+                        "message": "unknown or malformed message" })],
+                    Ok(ClientMessage::Join { id, channel }) => {
+                        st.channels.join(pool, &caller, &mut member, &id, &channel).await
+                    }
+                    Ok(ClientMessage::Leave { channel }) => vec![st.channels.leave(&mut member, &channel)],
+                    Ok(ClientMessage::Broadcast { channel, event, payload, include_self }) => st
+                        .channels
+                        .broadcast(pool, &caller, &mut member, &channel,
+                            channels::Outgoing { event, payload, include_self })
+                        .await
+                        .into_iter()
+                        .collect(),
+                    Ok(ClientMessage::Presence { channel, state }) => st
+                        .channels
+                        .presence(&caller, &mut member, &channel, state)
+                        .into_iter()
+                        .collect(),
+                    Ok(table_message) => vec![handle_client(pool, &caller, &mut subs, table_message).await],
+                };
+                for reply in replies {
+                    if !send(&mut sink, reply).await {
+                        break 'session;
+                    }
+                }
+            }
+            event = channel_events.recv() => {
+                match event {
+                    Ok(event) => {
+                        if let Some(body) = st.channels.deliver(&member, &event)
+                            && !send(&mut sink, body).await
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        let warn = json!({ "type": "error", "code": "lagged",
+                            "message": format!("{missed} channel messages were dropped") });
+                        if !send(&mut sink, warn).await { break }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             change = changes.recv() => {
@@ -162,9 +242,7 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                     continue;
                 }
                 if caller.expired() {
-                    let msg = json!({ "type": "error", "code": "token_expired",
-                        "message": "access token expired; reconnect with a fresh one" });
-                    let _ = send(&mut sink, msg).await;
+                    let _ = send(&mut sink, expired_message()).await;
                     break;
                 }
                 let body = if change.op == "DELETE" {
@@ -172,7 +250,7 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                     // SELECT on the table when they subscribed.
                     json!({ "old_pk": change.pk })
                 } else {
-                    match visible_row(&st.storage.pool, &caller, &change).await {
+                    match visible_row(pool, &caller, &change).await {
                         Ok(Some(record)) => json!({ "record": record }),
                         Ok(None) => continue,
                         Err(e) => {
@@ -187,26 +265,22 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                         e.extend(b.clone());
                     }
                     if !send(&mut sink, event).await {
-                        return;
+                        break 'session;
                     }
                 }
             }
         }
     }
+    // Others must see this connection's presence disappear however the socket ended.
+    st.channels.disconnect(&mut member);
 }
 
 async fn handle_client(
     pool: &Pool,
     caller: &Caller,
     subs: &mut HashMap<String, String>,
-    text: &str,
+    message: ClientMessage,
 ) -> Value {
-    let error =
-        |code: &str, message: &str| json!({ "type": "error", "code": code, "message": message });
-    let message = match serde_json::from_str::<ClientMessage>(text) {
-        Ok(m) => m,
-        Err(_) => return error("invalid_message", "expected subscribe or unsubscribe"),
-    };
     match message {
         ClientMessage::Unsubscribe { id } => {
             subs.remove(&id);
@@ -218,6 +292,8 @@ async fn handle_client(
             reply["id"] = Value::String(id);
             reply
         }
+        // Channel messages are routed in `session`.
+        _ => json!({ "type": "error", "code": "invalid_message", "message": "unexpected message" }),
     }
 }
 

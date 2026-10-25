@@ -54,3 +54,46 @@ Error codes: `invalid_message`, `forbidden`, `realtime_not_enabled`, `too_many_s
 - Rows of any size are delivered; only the primary key travels through `NOTIFY`.
 - Delivery is at-most-once. Changes committed while the server is reconnecting to Postgres, or while a slow
   client lags (`lagged` error), are lost — refetch over REST to resync.
+
+## Broadcast and presence channels
+
+Channels carry client-to-client messages that never touch a table: cursors, typing indicators, who is online.
+They are **closed by default**. Open them by replacing `realtime.authorize`, which runs as the calling user
+(so `auth.uid()` and `auth.jwt()` work); `action` is `join` (receive broadcasts and presence) or `broadcast`
+(send). The `service_role` key skips the check.
+
+```sql
+create or replace function realtime.authorize(channel text, action text) returns boolean
+    language sql stable as $$
+    select channel like 'room:%' or channel = 'user:' || auth.uid()::text $$;
+```
+
+Client → server:
+
+```json
+{"type": "join", "id": "j1", "channel": "room:42"}
+{"type": "leave", "channel": "room:42"}
+{"type": "broadcast", "channel": "room:42", "event": "cursor", "payload": {"x": 10}, "self": false}
+{"type": "presence", "channel": "room:42", "state": {"name": "Ada"}}
+{"type": "presence", "channel": "room:42", "state": null}
+```
+
+Server → client:
+
+```json
+{"type": "joined", "id": "j1", "channel": "room:42"}
+{"type": "presence_state", "channel": "room:42", "state": {"<key>": {"user": "<uuid>", "state": {...}}}}
+{"type": "broadcast", "channel": "room:42", "event": "cursor", "payload": {"x": 10}}
+{"type": "presence_diff", "channel": "room:42", "joins": {...}, "leaves": {...}}
+{"type": "left", "channel": "room:42"}
+```
+
+Additional error codes: `not_joined`, `too_many_channels`, `too_large`, `rate_limited`.
+
+Rules:
+
+- Broadcasts are not echoed to the sender unless `"self": true`.
+- Presence is per connection and disappears when the socket closes; others receive a `presence_diff` leave.
+  Presence state is limited to 4 KB.
+- A connection may send 50 broadcast/presence messages per second and join 100 channels.
+- Fan-out happens inside one `core` process; several replicas need a shared bus (not implemented yet).

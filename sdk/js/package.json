@@ -12,8 +12,8 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test test/unit.test.ts",
-    "test:e2e": "npm run build && node --test test/e2e.test.ts"
+    "test": "npm run build && node --test --test-timeout=60000 test/unit.test.ts",
+    "test:e2e": "npm run build && node --test --test-timeout=60000 test/e2e.test.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.5",

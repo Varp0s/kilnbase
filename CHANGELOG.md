@@ -21,6 +21,8 @@ First release candidate (planned as 0.1.0).
   unfinished ones are removed after 24 hours.
 - **Realtime**: WebSocket change feed where every insert and update is re-read as the subscriber, so RLS
   decides who receives it. Protocol in `docs/realtime-protocol.md`.
+- **Realtime channels**: broadcast and presence, closed by default and opened per channel/action by
+  `realtime.authorize()` (evaluated as the caller); per-connection rate and size limits.
 - **JS/TS client** (`kilnbase` on npm, no runtime dependencies): auth with cross-tab-safe refresh, query
   builder, storage and realtime.
 - **OAuth / OIDC sign-in**: GitHub, Google and generic OIDC providers; PKCE with the provider and with the

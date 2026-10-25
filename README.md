@@ -177,6 +177,18 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data)); // {type:"change", op:"IN
 ```
 
 Every insert and update is re-read as the subscriber, so clients only receive rows their RLS policies allow.
+**Broadcast and presence channels** carry messages between clients (cursors, typing, who is online). They are
+closed until you replace `realtime.authorize(channel, action)`, which runs as the calling user:
+
+```js
+const room = kb.realtime.channel("room:42", {
+  onBroadcast: (event, payload) => console.log(event, payload),
+  onPresence: (state) => console.log(Object.values(state)), // [{ user, state }]
+});
+room.track({ name: "Ada" });
+room.send("cursor", { x: 10 });
+```
+
 See [docs/realtime-protocol.md](docs/realtime-protocol.md).
 
 ## Architecture

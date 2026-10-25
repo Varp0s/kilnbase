@@ -275,3 +275,38 @@ test("anonymous user upgrades to a permanent account", async () => {
   const again = await client().auth.signInWithPassword(creds);
   assert.equal(again.data?.user.id, id);
 });
+
+test("channels: broadcast and presence", async () => {
+  execFileSync("docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1"], {
+    cwd: ROOT,
+    input: `create or replace function realtime.authorize(channel text, action text) returns boolean
+      language sql stable as $$ select channel like 'sdk-room:%' and auth.role() = 'authenticated' $$;`,
+  });
+  try {
+    const a = client();
+    const b = client();
+    await a.auth.signUp(credentials());
+    await b.auth.signUp(credentials());
+    const room = `sdk-room:${randomUUID()}`;
+    const received: unknown[] = [];
+    let presence: Record<string, unknown> = {};
+    const chA = a.realtime.channel(room, { onPresence: (s) => (presence = s) });
+    const chB = b.realtime.channel(room, { onBroadcast: (event, payload) => received.push({ event, payload }) });
+    await new Promise((r) => setTimeout(r, 500));
+    chA.track({ name: "ada" });
+    chA.send("hello", { n: 1 });
+    for (let i = 0; i < 50 && (received.length === 0 || Object.keys(presence).length === 0); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.deepEqual(received, [{ event: "hello", payload: { n: 1 } }]);
+    assert.deepEqual(Object.values(presence).map((p) => (p as { state: unknown }).state), [{ name: "ada" }]);
+    // Leaving every channel closes the sockets, so the test process can exit.
+    chA.leave();
+    chB.leave();
+  } finally {
+    execFileSync("docker", ["compose", "exec", "-T", "db", "psql", "-U", "postgres"], {
+      cwd: ROOT,
+      input: "create or replace function realtime.authorize(channel text, action text) returns boolean language sql stable as $$ select false $$;",
+    });
+  }
+});

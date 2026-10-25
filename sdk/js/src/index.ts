@@ -5,7 +5,7 @@ import { StorageClient } from "./storage.js";
 
 export type { AuthEvent, AuthListener, Credentials, Factor, Session, StorageAdapter, User } from "./auth.js";
 export type { KilnbaseError, Result } from "./http.js";
-export type { ChangeEvent, RealtimeError } from "./realtime.js";
+export type { Channel, ChannelOptions, ChangeEvent, PresenceState, RealtimeError } from "./realtime.js";
 export type { Query } from "./rest.js";
 export type { BucketClient, StoredObject, UploadOptions } from "./storage.js";
 

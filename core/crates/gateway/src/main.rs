@@ -1,4 +1,5 @@
 mod auth;
+mod channels;
 mod config;
 mod db;
 mod error;
@@ -27,6 +28,7 @@ struct AppState {
     http: proxy::HttpClient,
     storage: storage::Storage,
     realtime: realtime::Hub,
+    channels: channels::Channels,
 }
 
 #[tokio::main]
@@ -74,6 +76,7 @@ async fn main() -> ExitCode {
         http: proxy::client(),
         storage,
         realtime: hub,
+        channels: channels::Channels::default(),
     });
     let cors = cors_layer(cfg.cors_origins.as_deref());
     let resumable = Router::new()
