@@ -27,6 +27,9 @@ services:
       KILNBASE_PUBLIC_URL: ${KILNBASE_PUBLIC_URL:-http://localhost:8000}
       # Comma-separated app URLs that sign-in may redirect back to.
       KILNBASE_AUTH_REDIRECT_URLS: ${KILNBASE_AUTH_REDIRECT_URLS:-}
+      # Passwordless sign-in mail; without it codes are printed to the auth log (development only).
+      KILNBASE_SMTP_URL: ${KILNBASE_SMTP_URL:-}
+      KILNBASE_SMTP_FROM: ${KILNBASE_SMTP_FROM:-}
       # A provider is enabled when its client ID is set.
       KILNBASE_OAUTH_GITHUB_CLIENT_ID: ${KILNBASE_OAUTH_GITHUB_CLIENT_ID:-}
       KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}

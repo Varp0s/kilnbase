@@ -26,6 +26,8 @@ class Config:
     public_url: str = "http://localhost:8000"
     redirect_urls: tuple[str, ...] = ()
     providers: dict[str, Provider] | None = None
+    smtp_url: str | None = None
+    smtp_from: str = "Kilnbase <no-reply@localhost>"
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -67,7 +69,13 @@ def load(env: Mapping[str, str]) -> Config:
     except ValueError as e:
         raise ConfigError(str(e)) from e
 
+    smtp_url = env.get("KILNBASE_SMTP_URL", "").strip() or None
+    if smtp_url and not smtp_url.startswith(("smtp://", "smtps://")):
+        raise ConfigError("KILNBASE_SMTP_URL must start with smtp:// or smtps://")
+
     return Config(
+        smtp_url=smtp_url,
+        smtp_from=env.get("KILNBASE_SMTP_FROM", "").strip() or "Kilnbase <no-reply@localhost>",
         public_url=public_url,
         redirect_urls=redirect_urls,
         providers=providers,

@@ -22,6 +22,8 @@ First release candidate (planned as 0.1.0).
   builder, storage and realtime.
 - **OAuth / OIDC sign-in**: GitHub, Google and generic OIDC providers; PKCE with the provider and with the
   app, single-use state and codes, redirect allow-list, verified-email-only account linking.
+- **Passwordless email**: 6-digit codes and magic links over SMTP (implicit TLS or required STARTTLS),
+  single-use, 10-minute expiry, burned after 5 wrong tries, send limits, no account enumeration.
 - **MFA (TOTP)**: enrolment, single-use codes with ±30 s drift, rate-limited verification; enrolled users'
   password-only sessions get a token the APIs reject until the second factor is verified; refresh tokens issued
   before the upgrade are revoked.

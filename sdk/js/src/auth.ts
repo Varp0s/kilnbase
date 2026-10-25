@@ -90,6 +90,33 @@ export class AuthClient {
     return ok({ url: `${this.url}/auth/v1/authorize?${params}` });
   }
 
+  /**
+   * Emails a 6-digit code, plus a magic link to `redirectTo` when given. The response is identical
+   * whether or not the address has an account.
+   */
+  async signInWithOtp({
+    email,
+    redirectTo,
+    createUser = true,
+  }: {
+    email: string;
+    redirectTo?: string;
+    createUser?: boolean;
+  }): Promise<Result<null>> {
+    const res = await request(`${this.url}/auth/v1/otp`, {
+      method: "POST",
+      headers: { apikey: this.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, redirect_to: redirectTo, create_user: createUser }),
+    });
+    if (isError(res)) return { data: null, error: res };
+    return res.ok ? ok(null) : toError(res);
+  }
+
+  /** `type: "email"` with the emailed code, or `type: "magiclink"` with the `token` from the link. */
+  verifyOtp(params: { type: "email"; email: string; token: string } | { type: "magiclink"; token: string }) {
+    return this.#obtain("/auth/v1/verify", params, "SIGNED_IN");
+  }
+
   async exchangeCodeForSession(code: string): Promise<Result<Session>> {
     const verifier = this.#verifier ?? (await this.storage?.getItem(`${this.storageKey}:pkce`)) ?? null;
     if (!verifier) return fail(400, "missing_verifier", "call signInWithOAuth in this browser first");

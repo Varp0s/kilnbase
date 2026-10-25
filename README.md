@@ -103,6 +103,13 @@ The flow uses PKCE twice (with the provider, and between your app and Kilnbase),
 URLs and an intercepted code is useless. Redirects only go to allow-listed URLs, and a provider account is only
 linked to an existing user when the provider reports the email as verified.
 
+**Passwordless email.** `POST /auth/v1/otp {"email", "redirect_to"?}` mails a 6-digit code (and a magic link when
+`redirect_to` is allow-listed); `POST /auth/v1/verify` with `{"type":"email","email","token"}` or
+`{"type":"magiclink","token"}` returns a session. Codes are single-use, expire after 10 minutes and die after
+5 wrong tries; sending is limited per address and per client, and the answer never reveals whether an account
+exists. Set `KILNBASE_SMTP_URL` (`smtps://user:pass@host` or `smtp://` with STARTTLS); without it, mail is printed
+to the auth log for local development. JS: `kb.auth.signInWithOtp({ email })`, `kb.auth.verifyOtp(...)`.
+
 **Two-factor (TOTP).** `POST /auth/v1/factors` returns a secret and an `otpauth://` URI for any authenticator
 app; `POST /auth/v1/factors/<id>/verify {"code": "123456"}` confirms it. From then on a password sign-in returns
 `"mfa_required": true` and a token the REST, storage and realtime APIs reject until the code is verified — MFA is

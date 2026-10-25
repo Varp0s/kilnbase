@@ -8,8 +8,14 @@ services:
     ports:
       - "9100:9100"
 
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    ports:
+      - "8025:8025"
+
   auth:
     environment:
+      KILNBASE_SMTP_URL: smtp://mailpit:1025
       KILNBASE_OAUTH_MOCK_CLIENT_ID: mock-client
       KILNBASE_OAUTH_MOCK_CLIENT_SECRET: mock-secret
       # The browser (the test) reaches the provider on localhost; the auth service uses the network name.

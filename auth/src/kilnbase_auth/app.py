@@ -1,7 +1,11 @@
 import hmac
 import re
+import secrets
+import smtplib
+import sys
 import uuid
 from contextlib import asynccontextmanager
+from typing import Literal
 from urllib.parse import urlencode
 
 import asyncpg
@@ -17,6 +21,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Config
+from .mailer import Mailer
 from .mfa import matching_step
 from .oauth import (
     CODE_LIFETIME,
@@ -53,6 +58,22 @@ class CodeExchange(BaseModel):
     code: str = Field(max_length=256)
     # RFC 7636: verifiers are 43-128 characters.
     code_verifier: str = Field(min_length=43, max_length=128)
+
+
+class OtpRequest(BaseModel):
+    email: str = Field(max_length=254)
+    create_user: bool = True
+    redirect_to: str | None = Field(default=None, max_length=2048)
+
+
+class VerifyRequest(BaseModel):
+    type: Literal["email", "magiclink"]
+    email: str | None = Field(default=None, max_length=254)
+    token: str = Field(max_length=256)
+
+
+OTP_LIFETIME = 600
+OTP_MAX_ATTEMPTS = 5
 
 
 class CodeRequest(BaseModel):
@@ -101,6 +122,10 @@ def create_app(config: Config) -> FastAPI:
     ip_limiter = FailureLimiter(limit=100, window=900)
     # A 6-digit code has 10^6 values; 5 tries per 5 minutes keeps guessing hopeless.
     code_limiter = FailureLimiter(limit=5, window=300)
+    # Every send counts: caps mail bombing of one address and bulk sending from one client.
+    otp_email_limiter = FailureLimiter(limit=5, window=3600)
+    otp_ip_limiter = FailureLimiter(limit=30, window=3600)
+    mailer = Mailer(config.smtp_url, config.smtp_from)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -403,6 +428,117 @@ def create_app(config: Config) -> FastAPI:
                 "select email from auth.users where id = $1", row["user_id"]
             )
             return await issue_session(conn, row["user_id"], email)
+
+    @app.post("/otp")
+    async def request_otp(body: OtpRequest, request: Request):
+        """Emails a 6-digit code (and a magic link when redirect_to is given).
+
+        The answer is the same whether or not an account exists, so it cannot probe for emails.
+        """
+        email = normalize_email(body.email)
+        if email is None:
+            return error(422, "invalid_email", "email address is not valid")
+        allowed = [config.public_url, *config.redirect_urls]
+        if body.redirect_to and not redirect_allowed(body.redirect_to, allowed):
+            return error(400, "redirect_not_allowed", "add this URL to KILNBASE_AUTH_REDIRECT_URLS")
+        for limiter, key in (
+            (otp_email_limiter, f"otp:{email}"),
+            (otp_ip_limiter, client_ip(request)),
+        ):
+            if wait := limiter.retry_after(key):
+                return error(
+                    429,
+                    "too_many_requests",
+                    "too many codes requested",
+                    headers={"Retry-After": str(wait)},
+                )
+            limiter.fail(key)
+
+        async with app.state.pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "select exists (select 1 from auth.users where lower(email) = $1)", email
+            )
+            if not exists and not body.create_user:
+                return {"sent": True}
+            code = f"{secrets.randbelow(10**6):06d}"
+            link = new_secret()
+            await conn.execute(
+                "insert into auth.one_time_tokens (email, code_hash, link_hash, create_user)"
+                " values ($1, $2, $3, $4)"
+                " on conflict (email) do update set code_hash = excluded.code_hash,"
+                " link_hash = excluded.link_hash, create_user = excluded.create_user,"
+                " attempts = 0, created_at = now()",
+                email,
+                digest(f"{email}:{code}"),
+                digest(link),
+                body.create_user,
+            )
+        text = f"Your sign-in code is {code}. It expires in {OTP_LIFETIME // 60} minutes.\n"
+        if body.redirect_to:
+            separator = "&" if "?" in body.redirect_to else "?"
+            magic = urlencode({"type": "magiclink", "token": link})
+            text += f"\nOr sign in with this link:\n{body.redirect_to}{separator}{magic}\n"
+        text += "\nIf you did not ask for this, you can ignore this email.\n"
+        try:
+            await run_in_threadpool(mailer.send, email, "Your sign-in code", text)
+        except (OSError, smtplib.SMTPException) as e:
+            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
+            await app.state.pool.execute("delete from auth.one_time_tokens where email = $1", email)
+            return error(503, "mail_unavailable", "could not send the email, try again later")
+        return {"sent": True}
+
+    @app.post("/verify")
+    async def verify_otp(body: VerifyRequest):
+        invalid = error(400, "invalid_otp", "code or link is wrong, expired or already used")
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            if body.type == "email":
+                email = normalize_email(body.email or "")
+                if email is None:
+                    return invalid
+                row = await conn.fetchrow(
+                    "select code_hash, create_user, attempts,"
+                    " created_at > now() - make_interval(secs => $2) as fresh"
+                    " from auth.one_time_tokens where email = $1 for update",
+                    email,
+                    OTP_LIFETIME,
+                )
+                if row is None:
+                    return invalid
+                if not (
+                    row["fresh"]
+                    and row["attempts"] < OTP_MAX_ATTEMPTS
+                    and hmac.compare_digest(digest(f"{email}:{body.token}"), row["code_hash"])
+                ):
+                    # Too many wrong tries kills the code, so 6 digits cannot be brute forced.
+                    await conn.execute(
+                        "update auth.one_time_tokens set attempts = attempts + 1 where email = $1",
+                        email,
+                    )
+                    return invalid
+                await conn.execute("delete from auth.one_time_tokens where email = $1", email)
+                create_user = row["create_user"]
+            else:
+                row = await conn.fetchrow(
+                    "delete from auth.one_time_tokens where link_hash = $1"
+                    " and created_at > now() - make_interval(secs => $2)"
+                    " returning email, create_user",
+                    digest(body.token),
+                    OTP_LIFETIME,
+                )
+                if row is None:
+                    return invalid
+                email, create_user = row["email"], row["create_user"]
+
+            user_id = await conn.fetchval(
+                "select id from auth.users where lower(email) = $1", email
+            )
+            if user_id is None:
+                if not create_user:
+                    return invalid
+                user_id = await conn.fetchval(
+                    "insert into auth.users (email) values ($1) returning id", email
+                )
+            return await issue_session(conn, user_id, email)
 
     async def current_session(request: Request) -> dict | None:
         token = bearer(request)

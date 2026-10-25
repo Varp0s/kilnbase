@@ -237,3 +237,28 @@ test("OAuth: provider sign-in with PKCE", async (t) => {
   assert.equal(session.data?.user.email, email);
   assert.equal((await c.from("e2e_sdk").select()).error, null);
 });
+
+test("passwordless email code", async (t) => {
+  const mailpit = "http://localhost:8025";
+  try {
+    await fetch(`${mailpit}/api/v1/info`);
+  } catch {
+    t.skip("mail server not running (docker-compose.test.yml)");
+    return;
+  }
+  const c = client();
+  const email = `sdk-otp-${randomUUID().slice(0, 8)}@example.com`;
+  assert.equal((await c.auth.signInWithOtp({ email })).error, null);
+  let text = "";
+  for (let i = 0; i < 50 && !text; i++) {
+    const found = (await (await fetch(`${mailpit}/api/v1/search?query=to:${encodeURIComponent(email)}`)).json()) as {
+      messages: { ID: string }[];
+    };
+    if (found.messages.length) {
+      text = ((await (await fetch(`${mailpit}/api/v1/message/${found.messages[0]!.ID}`)).json()) as { Text: string }).Text;
+    } else await new Promise((r) => setTimeout(r, 100));
+  }
+  const token = /code is (\d{6})/.exec(text)![1]!;
+  const session = await c.auth.verifyOtp({ type: "email", email, token });
+  assert.equal(session.data?.user.email, email);
+});
