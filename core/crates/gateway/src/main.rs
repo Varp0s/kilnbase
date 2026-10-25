@@ -5,6 +5,7 @@ mod error;
 mod proxy;
 mod realtime;
 mod storage;
+mod tus;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, head, post};
 use axum::{Json, Router};
 use jsonwebtoken::DecodingKey;
 use serde_json::json;
@@ -53,6 +54,7 @@ async fn main() -> ExitCode {
             aws_lc_rs::hmac::HMAC_SHA256,
             cfg.storage_signing_key.as_bytes(),
         ),
+        busy_uploads: Default::default(),
     };
     if let Err(e) = storage.prepare_dirs().await {
         eprintln!(
@@ -74,6 +76,13 @@ async fn main() -> ExitCode {
         realtime: hub,
     });
     let cors = cors_layer(cfg.cors_origins.as_deref());
+    let resumable = Router::new()
+        .route("/storage/v1/upload/resumable", post(tus::create))
+        .route(
+            "/storage/v1/upload/resumable/{id}",
+            head(tus::status).patch(tus::append).delete(tus::terminate),
+        )
+        .route_layer(axum::middleware::map_response(tus::version_header));
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .route("/rest/v1/", any(rest))
@@ -96,6 +105,7 @@ async fn main() -> ExitCode {
                 .put(storage::upload)
                 .delete(storage::delete),
         )
+        .merge(resumable)
         .layer(cors)
         .with_state(state);
 
@@ -185,18 +195,31 @@ fn cors_layer(origins: Option<&[String]>) -> tower_http::cors::CorsLayer {
         "range",
         "accept-profile",
         "content-profile",
+        "tus-resumable",
+        "upload-length",
+        "upload-metadata",
+        "upload-offset",
+    ];
+    let exposed = [
+        "content-range",
+        "retry-after",
+        "location",
+        "tus-resumable",
+        "upload-length",
+        "upload-offset",
     ];
     CorsLayer::new()
         .allow_origin(allow_origin)
         .allow_methods([
             Method::GET,
+            Method::HEAD,
             Method::POST,
             Method::PUT,
             Method::PATCH,
             Method::DELETE,
         ])
         .allow_headers(headers.map(HeaderName::from_static))
-        .expose_headers(["content-range", "retry-after"].map(HeaderName::from_static))
+        .expose_headers(exposed.map(HeaderName::from_static))
         .max_age(std::time::Duration::from_secs(3600))
 }
 

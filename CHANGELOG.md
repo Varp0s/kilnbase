@@ -16,6 +16,9 @@ First release candidate (planned as 0.1.0).
   detection that revokes the whole session, argon2id hashing, per-email and per-IP rate limits.
 - **Storage**: buckets with size and MIME limits, uploads streamed to disk, RLS-decided access, public
   buckets, HMAC-signed links; downloads are served with `nosniff` and a sandboxing CSP.
+- **Resumable uploads** (tus 1.0 with creation and termination) at `/storage/v1/upload/resumable`: the
+  policy and size limit are checked before any bytes arrive, uploads are private to their creator, and
+  unfinished ones are removed after 24 hours.
 - **Realtime**: WebSocket change feed where every insert and update is re-read as the subscriber, so RLS
   decides who receives it. Protocol in `docs/realtime-protocol.md`.
 - **JS/TS client** (`kilnbase` on npm, no runtime dependencies): auth with cross-tab-safe refresh, query

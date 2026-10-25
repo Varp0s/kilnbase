@@ -25,6 +25,8 @@ pub struct Storage {
     pub dir: PathBuf,
     pub max_file_size: u64,
     pub signing_key: hmac::Key,
+    /// Resumable uploads currently receiving a PATCH.
+    pub busy_uploads: std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>,
 }
 
 const MAX_SIGNED_URL_LIFETIME: u64 = 7 * 24 * 3600;
@@ -32,6 +34,7 @@ const MAX_SIGNED_URL_LIFETIME: u64 = 7 * 24 * 3600;
 impl Storage {
     pub async fn prepare_dirs(&self) -> std::io::Result<()> {
         tokio::fs::create_dir_all(self.dir.join("tmp")).await?;
+        tokio::fs::create_dir_all(self.dir.join("uploads")).await?;
         tokio::fs::create_dir_all(self.dir.join("objects")).await
     }
 
@@ -52,7 +55,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
-fn bad_request(message: &'static str) -> ApiError {
+pub(crate) fn bad_request(message: &'static str) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
 }
 
@@ -60,7 +63,7 @@ fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "object not found")
 }
 
-fn too_large() -> ApiError {
+pub(crate) fn too_large() -> ApiError {
     ApiError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         "payload_too_large",
@@ -69,8 +72,8 @@ fn too_large() -> ApiError {
 }
 
 /// `type/subtype` without parameters, lower-cased; `None` if malformed.
-fn mime_essence(headers: &HeaderMap) -> Option<String> {
-    let Some(raw) = headers.get(header::CONTENT_TYPE) else {
+pub(crate) fn mime_essence(raw: Option<&HeaderValue>) -> Option<String> {
+    let Some(raw) = raw else {
         return Some("application/octet-stream".into());
     };
     let essence = raw
@@ -144,6 +147,83 @@ async fn bucket_settings(pool: &Pool, bucket: &str) -> Result<BucketSettings, Ap
     })
 }
 
+/// What is about to be written; shared by plain and resumable uploads.
+pub(crate) struct NewObject<'a> {
+    pub bucket: &'a str,
+    pub name: &'a str,
+    pub mime: &'a str,
+    pub upsert: bool,
+}
+
+impl NewObject<'_> {
+    /// Validates the name and the bucket's MIME allow-list; returns the size limit in bytes.
+    pub(crate) async fn limit(&self, storage: &Storage) -> Result<u64, ApiError> {
+        if !valid_name(self.name) {
+            return Err(bad_request("invalid object name"));
+        }
+        let settings = bucket_settings(&storage.pool, self.bucket).await?;
+        if !mime_allowed(self.mime, settings.allowed_mime_types.as_deref()) {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "mime_type_not_allowed",
+                "this bucket does not accept that content-type",
+            ));
+        }
+        Ok(settings.file_size_limit.map_or(storage.max_file_size, |l| {
+            (l as u64).min(storage.max_file_size)
+        }))
+    }
+
+    fn sql(&self) -> &'static str {
+        if self.upsert {
+            "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
+             on conflict (bucket_id, name) do update
+                set size = excluded.size, mime_type = excluded.mime_type, updated_at = now()
+             returning id::text"
+        } else {
+            "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
+             returning id::text"
+        }
+    }
+
+    /// Runs the insert as `caller` and rolls it back, so RLS and name conflicts are reported
+    /// before any bytes are accepted.
+    pub(crate) async fn check(&self, storage: &Storage, caller: &Caller) -> Result<(), ApiError> {
+        let mut client = db::client(&storage.pool).await?;
+        let tx = db::begin_as(&mut client, caller).await?;
+        tx.query_one(self.sql(), &[&self.bucket, &self.name, &0i64, &self.mime])
+            .await
+            .map_err(db::internal)?;
+        Ok(())
+    }
+
+    /// Inserts the row as `caller` and moves the finished file at `src` into place.
+    pub(crate) async fn store(
+        &self,
+        storage: &Storage,
+        caller: &Caller,
+        size: u64,
+        src: &std::path::Path,
+    ) -> Result<String, ApiError> {
+        let mut client = db::client(&storage.pool).await?;
+        let tx = db::begin_as(&mut client, caller).await?;
+        let id: String = tx
+            .query_one(
+                self.sql(),
+                &[&self.bucket, &self.name, &(size as i64), &self.mime],
+            )
+            .await
+            .map_err(db::internal)?
+            .get(0);
+        // Rename before commit: a failed commit leaves an orphan file, never a row without data.
+        tokio::fs::rename(src, storage.object_path(&id))
+            .await
+            .map_err(io_error)?;
+        tx.commit().await.map_err(db::internal)?;
+        Ok(id)
+    }
+}
+
 /// POST creates (409 if the name is taken); PUT creates or replaces.
 pub async fn upload(
     State(st): State<Arc<AppState>>,
@@ -151,22 +231,16 @@ pub async fn upload(
     req: Request,
 ) -> Result<Response, ApiError> {
     let caller = auth::authorize(&st.keys, req.headers())?;
-    if !valid_name(&name) {
-        return Err(bad_request("invalid object name"));
-    }
-    let mime = mime_essence(req.headers()).ok_or_else(|| bad_request("invalid content-type"))?;
+    let mime = mime_essence(req.headers().get(header::CONTENT_TYPE))
+        .ok_or_else(|| bad_request("invalid content-type"))?;
     let storage = &st.storage;
-    let settings = bucket_settings(&storage.pool, &bucket).await?;
-    let limit = settings.file_size_limit.map_or(storage.max_file_size, |l| {
-        (l as u64).min(storage.max_file_size)
-    });
-    if !mime_allowed(&mime, settings.allowed_mime_types.as_deref()) {
-        return Err(ApiError::new(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "mime_type_not_allowed",
-            "this bucket does not accept that content-type",
-        ));
-    }
+    let object = NewObject {
+        bucket: &bucket,
+        name: &name,
+        mime: &mime,
+        upsert: req.method() == Method::PUT,
+    };
+    let limit = object.limit(storage).await?;
     let declared = req
         .headers()
         .get(header::CONTENT_LENGTH)
@@ -174,7 +248,6 @@ pub async fn upload(
     if declared.is_some_and(|len| len > limit) {
         return Err(too_large());
     }
-    let upsert = req.method() == Method::PUT;
 
     // Stream to a temp file, enforcing the limit as bytes arrive rather than trusting headers.
     let tmp_path = storage
@@ -198,29 +271,8 @@ pub async fn upload(
     file.sync_all().await.map_err(io_error)?;
     drop(file);
 
-    let mut client = db::client(&storage.pool).await?;
-    let tx = db::begin_as(&mut client, &caller).await?;
-    let sql = if upsert {
-        "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
-         on conflict (bucket_id, name) do update
-            set size = excluded.size, mime_type = excluded.mime_type, updated_at = now()
-         returning id::text"
-    } else {
-        "insert into storage.objects (bucket_id, name, size, mime_type) values ($1, $2, $3, $4)
-         returning id::text"
-    };
-    let size_i64 = size as i64;
-    let id: String = tx
-        .query_one(sql, &[&bucket, &name, &size_i64, &mime])
-        .await
-        .map_err(db::internal)?
-        .get(0);
-    // Rename before commit: a failed commit leaves an orphan file, never a row without data.
-    tokio::fs::rename(&tmp_path, storage.object_path(&id))
-        .await
-        .map_err(io_error)?;
+    let id = object.store(storage, &caller, size, &tmp_path).await?;
     tmp.keep();
-    tx.commit().await.map_err(db::internal)?;
 
     Ok(
         Json(json!({ "id": id, "bucket": bucket, "name": name, "size": size, "mime_type": mime }))
@@ -519,18 +571,14 @@ mod tests {
 
     #[test]
     fn mime_parsing_and_allow_list() {
-        let mut h = HeaderMap::new();
         assert_eq!(
-            mime_essence(&h).as_deref(),
+            mime_essence(None).as_deref(),
             Some("application/octet-stream")
         );
-        h.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("Image/PNG; charset=x"),
-        );
-        assert_eq!(mime_essence(&h).as_deref(), Some("image/png"));
-        h.insert(header::CONTENT_TYPE, HeaderValue::from_static("nonsense"));
-        assert_eq!(mime_essence(&h), None);
+        let png = HeaderValue::from_static("Image/PNG; charset=x");
+        assert_eq!(mime_essence(Some(&png)).as_deref(), Some("image/png"));
+        let bad = HeaderValue::from_static("nonsense");
+        assert_eq!(mime_essence(Some(&bad)), None);
 
         let allowed = vec!["image/*".to_string(), "application/pdf".to_string()];
         assert!(mime_allowed("image/png", Some(&allowed)));

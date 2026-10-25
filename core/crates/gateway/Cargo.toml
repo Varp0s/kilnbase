@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 aws-lc-rs = "1.18.2"
+base64 = "0.22.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "http2", "tokio", "json", "query", "ws"] }
 deadpool-postgres = "0.14.2"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
