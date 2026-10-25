@@ -16,6 +16,17 @@ curl localhost:8000/health
 
 `kilnbase init` refuses to overwrite an existing `.env`, and every service refuses to start with missing or example secrets.
 
+### Security check
+
+```sh
+uv run kilnbase doctor
+```
+
+Audits `.env` (missing or example secrets, weak passwords, file permissions) and the running database:
+tables reachable without RLS (for example after a manual `GRANT`), views that bypass RLS, unconditional write
+policies for `anon`, `SECURITY DEFINER` functions callable from the API, and public buckets. Exits non-zero on
+anything blocking, so it fits in CI.
+
 ### JavaScript / TypeScript client
 
 ```js

@@ -2,7 +2,7 @@
 -- tables need RLS enabled, views need security_invoker (otherwise they run as their owner and bypass RLS),
 -- materialized views have no RLS at all and are never exposed.
 -- shortcut: an explicit GRANT on an unprotected relation is not reverted, and any ALTER on a protected
--- table restores the default grants; `kilnbase doctor` will flag both once it exists.
+-- table restores the default grants; `kilnbase doctor` flags exposed relations either way.
 create function kilnbase.enforce_rls() returns event_trigger
     language plpgsql
     as $$
