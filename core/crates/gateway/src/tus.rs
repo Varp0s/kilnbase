@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::{self, Caller};
 use crate::error::ApiError;
-use crate::storage::{NewObject, Storage, bad_request, mime_essence, too_large};
+use crate::storage::{NewObject, Storage, bad_request, drain, mime_essence, too_large};
 
 const VERSION: &str = "1.0.0";
 // shortcut: abandoned uploads are only swept when a new one starts; add a timer if disks fill up.
@@ -258,39 +258,47 @@ pub async fn append(
     Path(id): Path<String>,
     req: Request,
 ) -> Result<Response, ApiError> {
-    check_version(req.headers())?;
-    let caller = auth::authorize(&st.keys, req.headers())?;
-    if req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .map(HeaderValue::as_bytes)
-        != Some(b"application/offset+octet-stream")
-    {
-        return Err(ApiError::new(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_content_type",
-            "Content-Type must be application/offset+octet-stream",
-        ));
-    }
-    let offset = header_u64(req.headers(), "upload-offset")
-        .ok_or_else(|| bad_request("Upload-Offset is required"))?;
+    let (parts, mut body) = req.into_parts();
     let storage = &st.storage;
-    let (id, meta) = open(storage, &id, &caller).await?;
-    let _busy = Busy::take(storage, id)?;
+    let checked = async {
+        check_version(&parts.headers)?;
+        let caller = auth::authorize(&st.keys, &parts.headers)?;
+        if parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .map(HeaderValue::as_bytes)
+            != Some(b"application/offset+octet-stream")
+        {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "invalid_content_type",
+                "Content-Type must be application/offset+octet-stream",
+            ));
+        }
+        let offset = header_u64(&parts.headers, "upload-offset")
+            .ok_or_else(|| bad_request("Upload-Offset is required"))?;
+        let (id, meta) = open(storage, &id, &caller).await?;
+        let busy = Busy::take(storage, id)?;
 
-    let data_path = upload_dir(storage, id).join("data");
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&data_path)
-        .await
-        .map_err(io_error)?;
-    let mut size = file.metadata().await.map_err(io_error)?.len();
-    if offset != size {
-        return Err(conflict("Upload-Offset does not match the stored length"));
+        let data_path = upload_dir(storage, id).join("data");
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&data_path)
+            .await
+            .map_err(io_error)?;
+        let size = file.metadata().await.map_err(io_error)?.len();
+        if offset != size {
+            return Err(conflict("Upload-Offset does not match the stored length"));
+        }
+        file.seek(SeekFrom::Start(size)).await.map_err(io_error)?;
+        Ok((caller, id, meta, busy, data_path, file, size))
     }
-    file.seek(SeekFrom::Start(size)).await.map_err(io_error)?;
+    .await;
+    let (caller, id, meta, _busy, data_path, mut file, mut size) = match checked {
+        Ok(v) => v,
+        Err(e) => return Err(drain(body, e).await),
+    };
 
-    let mut body = req.into_body();
     let mut interrupted = false;
     while let Some(frame) = body.frame().await {
         // Bytes already written stay: that is what makes the upload resumable.

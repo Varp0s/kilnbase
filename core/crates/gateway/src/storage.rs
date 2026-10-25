@@ -224,30 +224,54 @@ impl NewObject<'_> {
     }
 }
 
+/// Reads a small rejected body before answering: closing with unread bytes sends a TCP reset,
+/// and the client would see a broken connection instead of the error.
+pub(crate) async fn drain(body: Body, e: ApiError) -> ApiError {
+    let limited = http_body_util::Limited::new(body, 64 * 1024);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), limited.collect()).await;
+    e
+}
+
 /// POST creates (409 if the name is taken); PUT creates or replaces.
 pub async fn upload(
     State(st): State<Arc<AppState>>,
     Path((bucket, name)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, ApiError> {
-    let caller = auth::authorize(&st.keys, req.headers())?;
-    let mime = mime_essence(req.headers().get(header::CONTENT_TYPE))
-        .ok_or_else(|| bad_request("invalid content-type"))?;
+    let (parts, mut body) = req.into_parts();
+    let upsert = parts.method == Method::PUT;
+    let checked = async {
+        let caller = auth::authorize(&st.keys, &parts.headers)?;
+        let mime = mime_essence(parts.headers.get(header::CONTENT_TYPE))
+            .ok_or_else(|| bad_request("invalid content-type"))?;
+        let object = NewObject {
+            bucket: &bucket,
+            name: &name,
+            mime: &mime,
+            upsert,
+        };
+        let limit = object.limit(&st.storage).await?;
+        let declared = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+        if declared.is_some_and(|len| len > limit) {
+            return Err(too_large());
+        }
+        Ok((caller, mime, limit))
+    }
+    .await;
+    let (caller, mime, limit) = match checked {
+        Ok(v) => v,
+        Err(e) => return Err(drain(body, e).await),
+    };
     let storage = &st.storage;
     let object = NewObject {
         bucket: &bucket,
         name: &name,
         mime: &mime,
-        upsert: req.method() == Method::PUT,
+        upsert,
     };
-    let limit = object.limit(storage).await?;
-    let declared = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-    if declared.is_some_and(|len| len > limit) {
-        return Err(too_large());
-    }
 
     // Stream to a temp file, enforcing the limit as bytes arrive rather than trusting headers.
     let tmp_path = storage
@@ -256,7 +280,6 @@ pub async fn upload(
         .join(uuid::Uuid::new_v4().to_string());
     let tmp = TempFile(Some(tmp_path.clone()));
     let mut file = tokio::fs::File::create(&tmp_path).await.map_err(io_error)?;
-    let mut body = req.into_body();
     let mut size: u64 = 0;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| bad_request("upload interrupted"))?;
