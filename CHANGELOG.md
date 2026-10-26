@@ -18,6 +18,8 @@ First release candidate (planned as 0.1.0).
   `createClient<Database>()` types `from()` per table.
 - **Storage**: buckets with size and MIME limits, uploads streamed to disk, RLS-decided access, public
   buckets, HMAC-signed links; downloads are served with `nosniff` and a sandboxing CSP.
+- **Image transformations** (optional imgproxy service): resize, quality and format conversion at
+  `/storage/v1/render/image/{authenticated,public}/…`, with the same access rules as downloads.
 - **Resumable uploads** (tus 1.0 with creation and termination) at `/storage/v1/upload/resumable`: the
   policy and size limit are checked before any bytes arrive, uploads are private to their creator, and
   unfinished ones are removed after 24 hours.

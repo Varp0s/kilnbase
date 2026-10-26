@@ -78,16 +78,42 @@ services:
       KILNBASE_STORAGE_SIGNING_KEY: ${KILNBASE_STORAGE_SIGNING_KEY:?run `kilnbase init` first}
       # Comma-separated list of allowed browser origins, or * for any.
       KILNBASE_CORS_ORIGINS: ${KILNBASE_CORS_ORIGINS:-*}
+      # Image transformations: set to http://imgproxy:8080 and start with COMPOSE_PROFILES=images.
+      KILNBASE_IMGPROXY_URL: ${KILNBASE_IMGPROXY_URL:-}
     volumes:
       - storage-data:/data
     ports:
       - "8000:8000"
+    networks: [default, images]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     depends_on:
       - auth
       - postgrest
+
+  # Optional; core authorizes every request and imgproxy only reads stored objects. It sits on an
+  # internal network that only core joins, which is why its URLs are unsigned.
+  imgproxy:
+    image: ghcr.io/imgproxy/imgproxy:v4.0.19
+    profiles: [images]
+    restart: unless-stopped
+    environment:
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /data
+      IMGPROXY_ALLOWED_SOURCES: local://
+      IMGPROXY_MAX_SRC_RESOLUTION: "50"
+      IMGPROXY_MAX_RESULT_DIMENSION: "2500"
+    volumes:
+      - storage-data:/data:ro
+    networks: [images]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  images:
+    internal: true
 
 volumes:
   db-data:

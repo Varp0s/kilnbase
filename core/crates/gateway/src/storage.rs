@@ -6,7 +6,7 @@ use aws_lc_rs::hmac;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use deadpool_postgres::Pool;
 use http_body_util::BodyExt;
@@ -25,6 +25,8 @@ pub struct Storage {
     pub dir: PathBuf,
     pub max_file_size: u64,
     pub signing_key: hmac::Key,
+    /// Image transformations are off unless an imgproxy instance is configured.
+    pub imgproxy_url: Option<String>,
     /// Resumable uploads currently receiving a PATCH.
     pub busy_uploads: std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>,
 }
@@ -471,6 +473,11 @@ async fn serve(
         h.insert(header::CONTENT_TYPE, v);
     }
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(object.size));
+    content_headers(h, cache);
+    Ok(res)
+}
+
+fn content_headers(h: &mut HeaderMap, cache: &'static str) {
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     // Uploaded HTML/SVG must never run as script on the API's origin.
     h.insert(
@@ -481,7 +488,121 @@ async fn serve(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; sandbox"),
     );
-    Ok(res)
+}
+
+const MAX_DIMENSION: u32 = 2500;
+
+#[derive(Deserialize)]
+pub struct Transform {
+    width: Option<u32>,
+    height: Option<u32>,
+    resize: Option<String>,
+    quality: Option<u8>,
+    format: Option<String>,
+}
+
+impl Transform {
+    /// imgproxy processing options, built only from validated values so callers cannot pass
+    /// arbitrary options (or a different source) through.
+    fn options(&self) -> Result<String, ApiError> {
+        let dim = |v: Option<u32>| match v {
+            None => Ok(0),
+            Some(n @ 1..=MAX_DIMENSION) => Ok(n),
+            Some(_) => Err(bad_request("width and height must be between 1 and 2500")),
+        };
+        let (w, h) = (dim(self.width)?, dim(self.height)?);
+        let resize = match self.resize.as_deref().unwrap_or("cover") {
+            "cover" => "fill",
+            "contain" => "fit",
+            "fill" => "force",
+            _ => return Err(bad_request("resize must be cover, contain or fill")),
+        };
+        let mut opts = format!("rs:{resize}:{w}:{h}");
+        match self.quality {
+            None => {}
+            Some(q @ 1..=100) => opts.push_str(&format!("/q:{q}")),
+            Some(_) => return Err(bad_request("quality must be between 1 and 100")),
+        }
+        match self.format.as_deref().unwrap_or("origin") {
+            "origin" => {}
+            f @ ("webp" | "avif" | "jpeg" | "png") => opts.push_str(&format!("/f:{f}")),
+            _ => {
+                return Err(bad_request(
+                    "format must be origin, webp, avif, jpeg or png",
+                ));
+            }
+        }
+        Ok(opts)
+    }
+}
+
+pub async fn render(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    Query(t): Query<Transform>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let caller = auth::authorize(&st.keys, &headers)?;
+    let options = t.options()?;
+    let object = find_as(&st.storage, Some(&caller), &bucket, &name, false).await?;
+    transform(&st, object, &options, "private, no-store").await
+}
+
+pub async fn render_public(
+    State(st): State<Arc<AppState>>,
+    Path((bucket, name)): Path<(String, String)>,
+    Query(t): Query<Transform>,
+) -> Result<Response, ApiError> {
+    let options = t.options()?;
+    let object = find_as(&st.storage, None, &bucket, &name, true).await?;
+    transform(&st, object, &options, "public, max-age=3600").await
+}
+
+async fn transform(
+    st: &AppState,
+    object: ObjectRef,
+    options: &str,
+    cache: &'static str,
+) -> Result<Response, ApiError> {
+    let Some(base) = &st.storage.imgproxy_url else {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "transformations_disabled",
+            "image transformations are not enabled on this server",
+        ));
+    };
+    if !object.mime_type.starts_with("image/") {
+        return Err(bad_request("only images can be transformed"));
+    }
+    // imgproxy is reachable only from core (internal network), so URLs are unsigned; the id is
+    // a database UUID and needs no escaping.
+    let uri: Uri = format!("{base}/_/{options}/plain/local:///objects/{}", object.id)
+        .parse()
+        .map_err(|_| bad_request("invalid transformation"))?;
+    let res = st.http.get(uri).await.map_err(|e| {
+        eprintln!("kilnbase-core: imgproxy error: {e}");
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
+            "image service unavailable",
+        )
+    })?;
+    if !res.status().is_success() {
+        eprintln!("kilnbase-core: imgproxy answered {}", res.status());
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "cannot_transform",
+            "the image could not be transformed",
+        ));
+    }
+    let content_type = res.headers().get(header::CONTENT_TYPE).cloned();
+    let mut out = Body::new(res.into_body()).into_response();
+    let h = out.headers_mut();
+    if let Some(v) = content_type {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    content_headers(h, cache);
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -616,6 +737,37 @@ mod tests {
         assert!(unhex("abc").is_none());
         assert!(unhex("zz").is_none());
         assert_eq!(encode_path("a b/ğ?.txt"), "a%20b/%C4%9F%3F.txt");
+    }
+
+    #[test]
+    fn transform_options() {
+        let t = |w, h, resize: Option<&str>, q, f: Option<&str>| {
+            Transform {
+                width: w,
+                height: h,
+                resize: resize.map(Into::into),
+                quality: q,
+                format: f.map(Into::into),
+            }
+            .options()
+        };
+        assert_eq!(t(None, None, None, None, None).unwrap(), "rs:fill:0:0");
+        assert_eq!(
+            t(
+                Some(200),
+                Some(100),
+                Some("contain"),
+                Some(70),
+                Some("webp")
+            )
+            .unwrap(),
+            "rs:fit:200:100/q:70/f:webp"
+        );
+        assert!(t(Some(0), None, None, None, None).is_err());
+        assert!(t(Some(2501), None, None, None, None).is_err());
+        assert!(t(None, None, Some("rs:x"), None, None).is_err());
+        assert!(t(None, None, None, Some(0), None).is_err());
+        assert!(t(None, None, None, None, Some("webp/plain/http:")).is_err());
     }
 
     proptest::proptest! {

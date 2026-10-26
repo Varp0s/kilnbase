@@ -165,6 +165,18 @@ Large files can be uploaded resumably with any [tus 1.0](https://tus.io/protocol
 endpoint `/storage/v1/upload/resumable`, metadata `bucketName`, `objectName` and `contentType`, plus the usual
 `apikey` and `Authorization` headers. Unfinished uploads are deleted after 24 hours.
 
+Images can be resized and converted on the fly once the optional imgproxy service is on
+(`COMPOSE_PROFILES=images` and `KILNBASE_IMGPROXY_URL=http://imgproxy:8080` in `.env`):
+
+```bash
+# width/height 1-2500, resize=cover|contain|fill, quality 1-100, format=origin|webp|avif|jpeg|png
+curl "localhost:8000/storage/v1/render/image/authenticated/avatars/ada/me.png?width=200&format=webp" \
+  -H "apikey: $KILNBASE_ANON_KEY" -H "Authorization: Bearer <access_token>"
+# public buckets: /storage/v1/render/image/public/<bucket>/<name>
+```
+
+The same RLS check as a download decides access; imgproxy only reads stored files and is reachable from `core` alone.
+
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
 
 ```sql

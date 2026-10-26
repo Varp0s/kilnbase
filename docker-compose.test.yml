@@ -37,3 +37,10 @@ services:
       KILNBASE_OAUTH_MOCK_TOKEN_URL: http://oauth-mock:9100/token
       KILNBASE_OAUTH_MOCK_USERINFO_URL: http://oauth-mock:9100/userinfo
       KILNBASE_AUTH_REDIRECT_URLS: http://localhost:3000
+
+  core:
+    environment:
+      KILNBASE_IMGPROXY_URL: http://imgproxy:8080
+
+  imgproxy:
+    profiles: !reset []

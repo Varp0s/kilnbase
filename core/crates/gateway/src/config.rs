@@ -14,6 +14,7 @@ pub struct Config {
     pub storage_dir: std::path::PathBuf,
     pub storage_max_file_size: u64,
     pub storage_signing_key: String,
+    pub imgproxy_url: Option<String>,
     /// `None` means any origin.
     pub cors_origins: Option<Vec<String>>,
     /// Verification keys by `kid`; the gateway never holds a signing key.
@@ -72,6 +73,9 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
                 .collect(),
         ),
     };
+    let imgproxy_url = get("KILNBASE_IMGPROXY_URL")
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty());
     let storage_max_file_size = match get("KILNBASE_STORAGE_MAX_FILE_SIZE") {
         None => 50 * 1024 * 1024,
         Some(v) => v
@@ -87,6 +91,7 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         storage_dir,
         storage_max_file_size,
         storage_signing_key,
+        imgproxy_url,
         cors_origins,
         keys,
     })

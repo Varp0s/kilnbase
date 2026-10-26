@@ -56,6 +56,7 @@ async fn main() -> ExitCode {
             aws_lc_rs::hmac::HMAC_SHA256,
             cfg.storage_signing_key.as_bytes(),
         ),
+        imgproxy_url: cfg.imgproxy_url,
         busy_uploads: Default::default(),
     };
     if let Err(e) = storage.prepare_dirs().await {
@@ -96,6 +97,14 @@ async fn main() -> ExitCode {
         .route(
             "/storage/v1/object/public/{bucket}/{*name}",
             get(storage::download_public),
+        )
+        .route(
+            "/storage/v1/render/image/authenticated/{bucket}/{*name}",
+            get(storage::render),
+        )
+        .route(
+            "/storage/v1/render/image/public/{bucket}/{*name}",
+            get(storage::render_public),
         )
         .route(
             "/storage/v1/object/sign/{bucket}/{*name}",
