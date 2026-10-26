@@ -31,6 +31,11 @@ bucket.remove("me/face.png")
 client.auth.sign_out()
 ```
 
+More, same as the JS client: `upsert`, `ilike`, `is_`, `range` on queries; `sign_in_anonymously`,
+`update_user`, `sign_in_with_otp` / `verify_otp` (code or magic link), `sign_in_with_oauth` +
+`exchange_code_for_session` (PKCE), `auth.mfa.enroll/verify/unenroll`; and
+`download(path, transform={"width": 200})` / `get_public_url(path, transform=...)` for images.
+
 Use the **anon** key, never `service_role`. The session lives in memory only and is refreshed
 automatically shortly before it expires. The client is not thread-safe.
 

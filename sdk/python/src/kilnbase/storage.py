@@ -1,6 +1,6 @@
 from collections.abc import Callable
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Literal, TypedDict
+from urllib.parse import quote, urlencode
 
 import httpx2 as httpx
 
@@ -10,6 +10,20 @@ from .errors import send
 def _encode_path(path: str) -> str:
     """Encodes each path segment but keeps `/` separators."""
     return "/".join(quote(p, safe="") for p in path.split("/"))
+
+
+class TransformOptions(TypedDict, total=False):
+    """Needs the server's optional image service; non-images are rejected."""
+
+    width: int  # 1-2500 pixels; leave one out to keep the aspect ratio
+    height: int
+    resize: Literal["cover", "contain", "fill"]
+    quality: int  # 1-100
+    format: Literal["origin", "webp", "avif", "jpeg", "png"]
+
+
+def _transform_query(t: TransformOptions) -> str:
+    return urlencode({k: v for k, v in t.items() if v is not None})
 
 
 class BucketClient:
@@ -40,8 +54,15 @@ class BucketClient:
         )
         return res.json()
 
-    def download(self, path: str) -> bytes:
-        return send(self._http, "GET", self._object_url(path), headers=self._headers()).content
+    def download(self, path: str, *, transform: TransformOptions | None = None) -> bytes:
+        """With `transform`, returns a resized/converted image instead of the stored bytes."""
+        url = self._object_url(path)
+        if transform:
+            url = (
+                f"{self._url}/storage/v1/render/image/authenticated/{self._bucket}/"
+                f"{_encode_path(path)}?{_transform_query(transform)}"
+            )
+        return send(self._http, "GET", url, headers=self._headers()).content
 
     def remove(self, path: str) -> None:
         send(self._http, "DELETE", self._object_url(path), headers=self._headers())
@@ -58,8 +79,13 @@ class BucketClient:
         body = res.json()
         return {"signed_url": f"{self._url}{body['signed_url']}", "expires_at": body["expires_at"]}
 
-    def get_public_url(self, path: str) -> str:
+    def get_public_url(self, path: str, *, transform: TransformOptions | None = None) -> str:
         """URL of an object in a public bucket; no request is made."""
+        if transform:
+            return (
+                f"{self._url}/storage/v1/render/image/public/{self._bucket}/"
+                f"{_encode_path(path)}?{_transform_query(transform)}"
+            )
         return f"{self._url}/storage/v1/object/public/{self._bucket}/{_encode_path(path)}"
 
     def _object_url(self, path: str) -> str:

@@ -38,11 +38,17 @@ class Query:
         self._method = "GET"
         self._body: Any = None
         self._single = False
+        self._prefer: list[str] = []
 
     def select(self, columns: str = "*") -> Query:
         return self._set("select", columns)
 
     def insert(self, rows: dict | list[dict]) -> Query:
+        return self._write("POST", rows)
+
+    def upsert(self, rows: dict | list[dict]) -> Query:
+        """Insert, or update rows whose primary key already exists."""
+        self._prefer.append("resolution=merge-duplicates")
         return self._write("POST", rows)
 
     def update(self, values: dict) -> Query:
@@ -72,6 +78,12 @@ class Query:
     def like(self, column: str, pattern: str) -> Query:
         return self._filter(column, "like", pattern)
 
+    def ilike(self, column: str, pattern: str) -> Query:
+        return self._filter(column, "ilike", pattern)
+
+    def is_(self, column: str, value: None | bool) -> Query:
+        return self._filter(column, "is", value)
+
     def in_(self, column: str, values: list[Primitive]) -> Query:
         self._params.append((column, f"in.({','.join(list_value(v) for v in values)})"))
         return self
@@ -82,6 +94,11 @@ class Query:
 
     def limit(self, count: int) -> Query:
         return self._set("limit", str(count))
+
+    def range(self, start: int, end: int) -> Query:
+        """Rows `start` to `end`, both inclusive and zero-based."""
+        self._set("offset", str(start))
+        return self._set("limit", str(end - start + 1))
 
     def single(self) -> Query:
         """`execute()` returns one row instead of a list; an error if zero or several match."""
@@ -99,7 +116,7 @@ class Query:
             headers["Accept"] = "application/vnd.pgrst.object+json"
         if self._method != "GET":
             # Writes return the affected rows, so callers see exactly what RLS let through.
-            headers["Prefer"] = "return=representation"
+            headers["Prefer"] = ",".join(["return=representation", *self._prefer])
         kwargs: dict[str, Any] = {"headers": headers}
         if self._body is not None:
             kwargs["json"] = self._body
