@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Query, listValue } from "../dist/rest.js";
-import { encodePath } from "../dist/storage.js";
+import { BucketClient, encodePath } from "../dist/storage.js";
 
 const noHeaders = async () => ({});
 
@@ -40,4 +40,13 @@ test("quotes list values with reserved characters", () => {
 
 test("encodes storage paths per segment", () => {
   assert.equal(encodePath("dir/a b/ğ?.png"), "dir/a%20b/%C4%9F%3F.png");
+});
+
+test("public URLs point at the image service only when transforming", () => {
+  const bucket = new BucketClient("http://x", "pics", noHeaders);
+  assert.equal(bucket.getPublicUrl("a b.png"), "http://x/storage/v1/object/public/pics/a%20b.png");
+  assert.equal(
+    bucket.getPublicUrl("a b.png", { transform: { width: 200, height: undefined, format: "webp" } }),
+    "http://x/storage/v1/render/image/public/pics/a%20b.png?width=200&format=webp",
+  );
 });

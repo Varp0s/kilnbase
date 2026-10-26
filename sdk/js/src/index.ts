@@ -7,7 +7,7 @@ export type { AuthEvent, AuthListener, Credentials, Factor, Session, StorageAdap
 export type { KilnbaseError, Result } from "./http.js";
 export type { Channel, ChannelOptions, ChangeEvent, PresenceState, RealtimeError } from "./realtime.js";
 export type { Query } from "./rest.js";
-export type { BucketClient, StoredObject, UploadOptions } from "./storage.js";
+export type { BucketClient, StoredObject, TransformOptions, UploadOptions } from "./storage.js";
 
 export interface ClientOptions {
   /**

@@ -16,6 +16,20 @@ export interface UploadOptions {
   upsert?: boolean;
 }
 
+/** Needs the server's optional image service; non-images are rejected. */
+export interface TransformOptions {
+  /** 1-2500 pixels; leave one out to keep the aspect ratio. */
+  width?: number;
+  height?: number;
+  resize?: "cover" | "contain" | "fill";
+  /** 1-100. */
+  quality?: number;
+  format?: "origin" | "webp" | "avif" | "jpeg" | "png";
+}
+
+const transformQuery = (t: TransformOptions) =>
+  new URLSearchParams(Object.entries(t).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]]))).toString();
+
 /** Encodes each path segment but keeps `/` separators. */
 export const encodePath = (path: string) => path.split("/").map(encodeURIComponent).join("/");
 
@@ -45,8 +59,12 @@ export class BucketClient {
     return res.ok ? ok((await res.json()) as StoredObject) : toError(res);
   }
 
-  async download(path: string): Promise<Result<Blob>> {
-    const res = await request(this.#objectUrl(path), { headers: await this.headers() });
+  /** With `transform`, returns a resized/converted image instead of the stored bytes. */
+  async download(path: string, { transform }: { transform?: TransformOptions } = {}): Promise<Result<Blob>> {
+    const url = transform
+      ? `${this.url}/storage/v1/render/image/authenticated/${this.bucket}/${encodePath(path)}?${transformQuery(transform)}`
+      : this.#objectUrl(path);
+    const res = await request(url, { headers: await this.headers() });
     if (isError(res)) return { data: null, error: res };
     return res.ok ? ok(await res.blob()) : toError(res);
   }
@@ -75,7 +93,10 @@ export class BucketClient {
   }
 
   /** URL of an object in a public bucket; no request is made. */
-  getPublicUrl(path: string): string {
+  getPublicUrl(path: string, { transform }: { transform?: TransformOptions } = {}): string {
+    if (transform) {
+      return `${this.url}/storage/v1/render/image/public/${this.bucket}/${encodePath(path)}?${transformQuery(transform)}`;
+    }
     return `${this.url}/storage/v1/object/public/${this.bucket}/${encodePath(path)}`;
   }
 

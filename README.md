@@ -175,6 +175,8 @@ curl "localhost:8000/storage/v1/render/image/authenticated/avatars/ada/me.png?wi
 # public buckets: /storage/v1/render/image/public/<bucket>/<name>
 ```
 
+From the JS client: `download(path, { transform: { width: 200 } })` or `getPublicUrl(path, { transform })`.
+
 The same RLS check as a download decides access; imgproxy only reads stored files and is reachable from `core` alone.
 
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
