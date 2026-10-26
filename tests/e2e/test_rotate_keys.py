@@ -1,12 +1,10 @@
-import contextlib
 import json
 import shutil
 import subprocess
-import time
 
 import jwt
 import pytest
-from conftest import ROOT, psql, read_env, wait_for_schema
+from conftest import ROOT, psql, read_env, wait_for_gateway, wait_for_schema
 from cryptography.hazmat.primitives.asymmetric import ec
 from kilnbase_cli.doctor import parse_env
 from kilnbase_cli.rotate_keys import rotate
@@ -28,16 +26,6 @@ def compose_up(env_file=None):
     subprocess.run(  # noqa: S603 - fixed argv
         [*argv, "up", "-d", "--wait"], cwd=ROOT, check=True, capture_output=True, timeout=300
     )
-
-
-def wait_for_gateway(client):
-    for _ in range(100):
-        # The container may still be refusing connections.
-        with contextlib.suppress(Exception):
-            if client.get("/health").status_code == 200:
-                return
-        time.sleep(0.2)
-    raise AssertionError("gateway did not come back")
 
 
 @pytest.fixture(scope="module")

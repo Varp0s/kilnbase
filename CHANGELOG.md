@@ -14,6 +14,8 @@ First release candidate (planned as 0.1.0).
   tables without RLS, views without `security_invoker` and materialized views are hidden automatically.
 - **Auth**: email/password sign-up and sign-in, ES256 access tokens, single-use refresh tokens with reuse
   detection that revokes the whole session, argon2id hashing, per-email and per-IP rate limits.
+- **CLI**: `kilnbase backup` / `kilnbase restore` archive the database and stored files into one file and
+  restore it after checking that its migrations match the running version.
 - **CLI**: `kilnbase rotate-keys` switches to a new ES256 signing key without downtime (old keys stay in the
   JWKS until `--retire`) and reissues the anon and service_role keys.
 - **CLI**: `kilnbase gen types` writes a TypeScript `Database` type for the tables the API exposes;

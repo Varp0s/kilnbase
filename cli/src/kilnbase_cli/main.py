@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import doctor, gen_types, init, rotate_keys
+from . import backup, doctor, gen_types, init, rotate_keys
 
 
 def main() -> None:
@@ -34,6 +34,15 @@ def main() -> None:
         "--retire", action="store_true", help="drop keys that no longer sign from the JWKS"
     )
 
+    backup_cmd = commands.add_parser("backup", help="archive the database and stored files")
+    backup_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+    backup_cmd.add_argument("-o", "--output", type=Path, help="default: kilnbase-backup-<time>.tar")
+
+    restore_cmd = commands.add_parser("restore", help="replace all data with a backup")
+    restore_cmd.add_argument("file", type=Path)
+    restore_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+    restore_cmd.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+
     args = parser.parse_args()
     if args.command == "init":
         sys.exit(init.run(args.env_file, args.force))
@@ -43,6 +52,10 @@ def main() -> None:
         sys.exit(gen_types.run(args.env_file, args.schema, args.output))
     if args.command == "rotate-keys":
         sys.exit(rotate_keys.run(args.env_file, args.retire))
+    if args.command == "backup":
+        sys.exit(backup.backup(args.env_file, args.output))
+    if args.command == "restore":
+        sys.exit(backup.restore(args.env_file, args.file, args.yes))
 
 
 if __name__ == "__main__":

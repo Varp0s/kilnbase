@@ -1,5 +1,6 @@
 """End-to-end tests against a running stack (`docker compose up`). Enable with KILNBASE_E2E=1."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -96,3 +97,14 @@ def wait_for_schema(client: httpx.Client, keys: Keys, table: str) -> None:
             return
         time.sleep(0.2)
     raise AssertionError(f"{table} never appeared in the API")
+
+
+def wait_for_gateway(client: httpx.Client) -> None:
+    """For tests that restart services."""
+    for _ in range(100):
+        # The container may still be refusing connections.
+        with contextlib.suppress(Exception):
+            if client.get("/health").status_code == 200:
+                return
+        time.sleep(0.2)
+    raise AssertionError("gateway did not come back")

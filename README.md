@@ -38,6 +38,19 @@ uv run kilnbase rotate-keys --retire && docker compose up -d   # stop accepting 
 Rotation never logs anyone out: the JWKS keeps the previous public keys, so existing sessions and the old API
 keys stay valid until `--retire`. `.env` is rewritten atomically and keeps its file permissions.
 
+### Backup and restore
+
+```sh
+uv run kilnbase backup -o kilnbase.tar     # database (pg_dump) + stored files, one file
+uv run kilnbase restore kilnbase.tar       # asks first; --yes for scripts
+```
+
+No local Postgres tools are needed: the dump runs inside the `db` container. `restore` refuses a backup whose
+migrations differ from the running version, stops the other services while it runs, and only replaces the
+database once the dump has restored cleanly into a scratch copy. The archive holds password hashes and all user
+data, so treat it like a secret; it does not contain `.env`, which you must keep separately (without the same
+keys, restored sessions and API keys are invalid). Only the local storage volume is included.
+
 ### TypeScript types
 
 ```sh
