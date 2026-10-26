@@ -212,9 +212,15 @@ SigV4, region `us-east-1` unless `KILNBASE_S3_REGION` says otherwise). Two kinds
   RLS decides exactly as for the native API.
 
 ```python
-s3 = boto3.client("s3", endpoint_url="http://localhost:8000/storage/v1/s3", region_name="us-east-1",
-                  aws_access_key_id="user", aws_secret_access_key=access_token, aws_session_token=access_token,
-                  config=Config(signature_version="s3v4", s3={"addressing_style": "path"}))
+s3 = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:8000/storage/v1/s3",
+    region_name="us-east-1",
+    aws_access_key_id="user",
+    aws_secret_access_key=access_token,
+    aws_session_token=access_token,
+    config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+)
 ```
 
 Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/DeleteObject, multipart uploads and SigV4
