@@ -150,6 +150,27 @@ async fn load_events(
     Ok((changes, oldest))
 }
 
+/// Records where the outbox stands. Events already in the replay window count as seen, so a
+/// later replay does not re-send what was committed before this process started.
+async fn baseline(pool: &Pool, seen: &mut Seen) -> Result<(), crate::error::ApiError> {
+    let mut client = db::client(pool).await?;
+    let tx = db::begin_as_service(&mut client).await?;
+    let max: i64 = tx
+        .query_one(
+            "select coalesce(max(id), 0) from kilnbase.realtime_events",
+            &[],
+        )
+        .await
+        .map_err(db::internal)?
+        .get(0);
+    let (recent, _) = load_events(pool, None, max - RECONNECT_OVERLAP, i64::MAX).await?;
+    for change in recent.into_iter().filter(|c| c.id <= max) {
+        seen.insert(change.id);
+    }
+    seen.newest = Some(seen.newest.map_or(max, |n| n.max(max)));
+    Ok(())
+}
+
 async fn listen(
     database_url: &str,
     pool: &Pool,
@@ -179,7 +200,12 @@ async fn listen(
     eprintln!("kilnbase-core: realtime listening");
 
     // LISTEN is active before the replay query, so nothing can fall between the two.
-    if let Some(newest) = seen.newest {
+    if seen.newest.is_none() {
+        // First connection: without a baseline, a drop before any event would skip the replay.
+        if let Err(e) = baseline(pool, seen).await {
+            eprintln!("kilnbase-core: realtime baseline failed: {e:?}");
+        }
+    } else if let Some(newest) = seen.newest {
         match load_events(pool, None, newest - RECONNECT_OVERLAP, i64::MAX).await {
             Ok((missed, _)) => {
                 for change in missed {
