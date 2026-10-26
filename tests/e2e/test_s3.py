@@ -1,10 +1,13 @@
 """S3-compatible API, exercised with a real S3 client (boto3) rather than our own signer."""
 
+import io
+import os
 import uuid
 
 import boto3
 import httpx2 as httpx
 import pytest
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from conftest import BASE_URL, psql
@@ -165,9 +168,78 @@ def test_limits_and_unsupported_operations(service):
         service.put_object(Bucket="e2e-s3-small", Key="big.bin", Body=b"x" * 64)
     assert code(e) == "EntityTooLarge"
     with pytest.raises(ClientError) as e:
-        service.create_multipart_upload(Bucket="e2e-s3", Key="multi.bin")
+        service.copy_object(Bucket="e2e-s3", Key="copy.bin", CopySource="e2e-s3/anything")
     assert code(e) == "NotImplemented"
     with pytest.raises(ClientError) as e:
         service.get_object_acl(Bucket="e2e-s3", Key="anything")
     assert code(e) == "NotImplemented"
     assert "e2e-s3" in [b["Name"] for b in service.list_buckets()["Buckets"]]
+
+
+def test_multipart_upload_through_the_transfer_manager(keys):
+    a = user_client(keys)
+    key = f"{uuid.uuid4().hex}/big.bin"
+    data = os.urandom(12 * 1024 * 1024)
+    # 5 MB parts: the transfer manager uploads them concurrently, then completes.
+    config = TransferConfig(
+        multipart_threshold=5 * 1024 * 1024, multipart_chunksize=5 * 1024 * 1024
+    )
+    a.upload_fileobj(io.BytesIO(data), "e2e-s3", key, Config=config)
+    out = io.BytesIO()
+    a.download_fileobj("e2e-s3", key, out, Config=config)
+    assert out.getvalue() == data
+
+
+def test_multipart_uploads_belong_to_their_creator(keys):
+    a, b = user_client(keys), user_client(keys)
+    key = f"{uuid.uuid4().hex}.bin"
+    upload = a.create_multipart_upload(Bucket="e2e-s3", Key=key)["UploadId"]
+    part = a.upload_part(Bucket="e2e-s3", Key=key, UploadId=upload, PartNumber=1, Body=b"abc")
+
+    with pytest.raises(ClientError) as e:
+        b.upload_part(Bucket="e2e-s3", Key=key, UploadId=upload, PartNumber=2, Body=b"x")
+    assert code(e) == "NoSuchUpload"
+    done = {"Parts": [{"ETag": part["ETag"], "PartNumber": 1}]}
+    with pytest.raises(ClientError) as e:
+        b.complete_multipart_upload(Bucket="e2e-s3", Key=key, UploadId=upload, MultipartUpload=done)
+    assert code(e) == "NoSuchUpload"
+    with pytest.raises(ClientError) as e:
+        a.complete_multipart_upload(
+            Bucket="e2e-s3",
+            Key=key,
+            UploadId=upload,
+            MultipartUpload={"Parts": [{"ETag": part["ETag"], "PartNumber": 3}]},
+        )
+    assert code(e) == "InvalidPart"
+
+    a.complete_multipart_upload(Bucket="e2e-s3", Key=key, UploadId=upload, MultipartUpload=done)
+    assert a.get_object(Bucket="e2e-s3", Key=key)["Body"].read() == b"abc"
+    with pytest.raises(ClientError) as e:
+        a.upload_part(Bucket="e2e-s3", Key=key, UploadId=upload, PartNumber=2, Body=b"late")
+    assert code(e) == "NoSuchUpload"
+
+
+def test_aborted_and_oversized_multipart_uploads(service):
+    key = f"{uuid.uuid4().hex}.bin"
+    upload = service.create_multipart_upload(Bucket="e2e-s3", Key=key)["UploadId"]
+    service.upload_part(Bucket="e2e-s3", Key=key, UploadId=upload, PartNumber=1, Body=b"x")
+    service.abort_multipart_upload(Bucket="e2e-s3", Key=key, UploadId=upload)
+    with pytest.raises(ClientError) as e:
+        service.upload_part(Bucket="e2e-s3", Key=key, UploadId=upload, PartNumber=2, Body=b"x")
+    assert code(e) == "NoSuchUpload"
+
+    upload = service.create_multipart_upload(Bucket="e2e-s3-small", Key=key)["UploadId"]
+    parts = [
+        {
+            "ETag": service.upload_part(
+                Bucket="e2e-s3-small", Key=key, UploadId=upload, PartNumber=n, Body=b"x" * 10
+            )["ETag"],
+            "PartNumber": n,
+        }
+        for n in (1, 2)
+    ]
+    with pytest.raises(ClientError) as e:
+        service.complete_multipart_upload(
+            Bucket="e2e-s3-small", Key=key, UploadId=upload, MultipartUpload={"Parts": parts}
+        )
+    assert code(e) == "EntityTooLarge"

@@ -168,6 +168,37 @@ pub(crate) async fn receive(
     Ok(Received { tmp, path, size })
 }
 
+/// Concatenates `parts` into a new temp file; `not_found` if one is missing.
+pub(crate) async fn assemble(
+    storage: &Storage,
+    parts: &[PathBuf],
+    limit: u64,
+) -> Result<Received, ApiError> {
+    let path = storage
+        .dir
+        .join("tmp")
+        .join(uuid::Uuid::new_v4().to_string());
+    let tmp = TempFile(Some(path.clone()));
+    let mut file = tokio::fs::File::create(&path).await.map_err(io_error)?;
+    let mut size: u64 = 0;
+    for part in parts {
+        let mut src = match tokio::fs::File::open(part).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+            Err(e) => return Err(io_error(e)),
+        };
+        size += src.metadata().await.map_err(io_error)?.len();
+        if size > limit {
+            return Err(too_large());
+        }
+        tokio::io::copy(&mut src, &mut file)
+            .await
+            .map_err(io_error)?;
+    }
+    file.sync_all().await.map_err(io_error)?;
+    Ok(Received { tmp, path, size })
+}
+
 struct BucketSettings {
     file_size_limit: Option<i64>,
     allowed_mime_types: Option<Vec<String>>,

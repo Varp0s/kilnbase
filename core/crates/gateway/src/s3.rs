@@ -6,6 +6,7 @@
 //! other access key id must come with `x-amz-security-token` holding a Kilnbase access token,
 //! which is also the signing secret, so apps never hold a shared secret.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aws_lc_rs::{digest, hmac};
@@ -22,6 +23,10 @@ use crate::auth::{self, Caller};
 use crate::db;
 use crate::error::ApiError;
 use crate::storage::{self, NewObject, bad_request, hex, now, unhex};
+use crate::tus;
+use http_body_util::BodyExt;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const PREFIX: &str = "/storage/v1/s3";
 const ALGORITHM: &str = "AWS4-HMAC-SHA256";
@@ -540,13 +545,28 @@ pub async fn handle(State(st): State<Arc<AppState>>, req: Request) -> Response {
         Err(e) => return storage::drain(body, e).await.into_response(),
     };
     let (has_bucket, has_key) = (!target.bucket.is_empty(), !target.key.is_empty());
-    let result = match parts.method {
-        Method::PUT if has_key => {
-            return match put_object(&st, &caller, &target, &parts.headers, body).await {
-                Ok(r) => r,
-                Err(e) => e.into_response(),
-            };
+    let multipart = target.param("uploadId").is_some();
+    // Operations that read the body return directly; the rest leave it unread.
+    let with_body = match parts.method {
+        Method::PUT if has_key && multipart => {
+            Some(upload_part(&st, &caller, &target, &parts.headers, body).await)
         }
+        Method::PUT if has_key => {
+            Some(put_object(&st, &caller, &target, &parts.headers, body).await)
+        }
+        Method::POST if has_key && multipart => {
+            Some(complete_multipart(&st, &caller, &target, body).await)
+        }
+        _ => None,
+    };
+    if let Some(result) = with_body {
+        return result.unwrap_or_else(IntoResponse::into_response);
+    }
+    let result = match parts.method {
+        Method::POST if has_key && target.param("uploads").is_some() => {
+            create_multipart(&st, &caller, &target, &parts.headers).await
+        }
+        Method::DELETE if has_key && multipart => abort_multipart(&st, &caller, &target).await,
         Method::GET if !has_bucket => list_buckets(&st, &caller).await,
         Method::GET if !has_key && target.param("location").is_some() => {
             bucket_location(&st, &target).await
@@ -879,11 +899,6 @@ async fn put_object(
     body: Body,
 ) -> Result<Response, S3Error> {
     let storage = &st.storage;
-    let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
-    // Presigned uploads carry no payload hash header and are unsigned by definition.
-    let payload = header("x-amz-content-sha256").unwrap_or("UNSIGNED-PAYLOAD");
-    let chunked = payload.starts_with("STREAMING-")
-        || header("content-encoding").is_some_and(|v| v.contains("aws-chunked"));
     let checked = async {
         t.only_params(&[])?;
         if headers.contains_key("x-amz-copy-source") {
@@ -898,13 +913,7 @@ async fn put_object(
             upsert: true,
         };
         let limit = object.limit(storage).await?;
-        let declared = header(if chunked {
-            "x-amz-decoded-content-length"
-        } else {
-            "content-length"
-        })
-        .and_then(|v| v.parse::<u64>().ok());
-        if declared.is_some_and(|len| len > limit) {
+        if declared_length(headers).is_some_and(|len| len > limit) {
             return Err(storage::too_large().into());
         }
         // RLS decides before any bytes are accepted.
@@ -916,11 +925,55 @@ async fn put_object(
         Ok(v) => v,
         Err(e) => return Err(storage::drain(body, e).await),
     };
+    let received = receive_payload(st, headers, body, limit).await?;
+    let object = NewObject {
+        bucket: &t.bucket,
+        name: &t.key,
+        mime: &mime,
+        upsert: true,
+    };
+    let id = object
+        .store(storage, caller, received.size, &received.path)
+        .await?;
+    received.keep();
+    let mut res = StatusCode::OK.into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!("\"{id}\"")) {
+        res.headers_mut().insert(header::ETAG, v);
+    }
+    Ok(res)
+}
 
+/// `(payload hash, aws-chunked)`; presigned uploads carry no hash header and are unsigned.
+fn payload_mode(headers: &HeaderMap) -> (&str, bool) {
+    let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+    let payload = header("x-amz-content-sha256").unwrap_or("UNSIGNED-PAYLOAD");
+    let chunked = payload.starts_with("STREAMING-")
+        || header("content-encoding").is_some_and(|v| v.contains("aws-chunked"));
+    (payload, chunked)
+}
+
+/// The size the client says the object has, without aws-chunked framing.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let name = if payload_mode(headers).1 {
+        "x-amz-decoded-content-length"
+    } else {
+        "content-length"
+    };
+    headers.get(name)?.to_str().ok()?.parse().ok()
+}
+
+/// Streams the body to a temp file, stripping aws-chunked framing and checking a declared SHA-256.
+async fn receive_payload(
+    st: &AppState,
+    headers: &HeaderMap,
+    body: Body,
+    limit: u64,
+) -> Result<storage::Received, S3Error> {
+    let (payload, chunked) = payload_mode(headers);
     let expected = (payload.len() == 64).then(|| unhex(payload)).flatten();
     let mut decoder = chunked.then(AwsChunked::default);
     let mut hasher = digest::Context::new(&digest::SHA256);
-    let received = storage::receive(storage, body, limit, |data| {
+    let received = storage::receive(&st.storage, body, limit, |data| {
         let data = match &mut decoder {
             Some(d) => d
                 .feed(&data)
@@ -945,21 +998,245 @@ async fn put_object(
             "the payload does not match x-amz-content-sha256",
         ));
     }
+    Ok(received)
+}
+
+// ---- multipart uploads ----
+// Parts live in `uploads/s3-<id>/` next to tus uploads, so the same 24-hour sweep removes
+// abandoned ones; the prefix keeps the two protocols from opening each other's uploads.
+
+const MAX_PARTS: u32 = 10_000;
+
+#[derive(Serialize, Deserialize)]
+struct Multipart {
+    bucket: String,
+    name: String,
+    mime: String,
+    limit: u64,
+    role: String,
+    sub: Option<String>,
+}
+
+fn caller_sub(caller: &Caller) -> Option<String> {
+    caller
+        .claims
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn no_such_upload() -> S3Error {
+    err(
+        StatusCode::NOT_FOUND,
+        "NoSuchUpload",
+        "the specified upload does not exist",
+    )
+}
+
+fn upload_dir(st: &AppState, id: Uuid) -> PathBuf {
+    st.storage.dir.join("uploads").join(format!("s3-{id}"))
+}
+
+/// Loads an upload started by `caller` for this bucket and key; anything else looks missing.
+async fn open_upload(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+) -> Result<(PathBuf, Multipart), S3Error> {
+    let id = t
+        .param("uploadId")
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(no_such_upload)?;
+    let dir = upload_dir(st, id);
+    let raw = match tokio::fs::read(dir.join("meta.json")).await {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(no_such_upload()),
+        Err(e) => return Err(io_error(e)),
+    };
+    let meta: Multipart = serde_json::from_slice(&raw).map_err(|_| no_such_upload())?;
+    if meta.bucket != t.bucket
+        || meta.name != t.key
+        || meta.role != caller.role
+        || meta.sub != caller_sub(caller)
+    {
+        return Err(no_such_upload());
+    }
+    Ok((dir, meta))
+}
+
+async fn create_multipart(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    headers: &HeaderMap,
+) -> Result<Response, S3Error> {
+    t.only_params(&["uploads"])?;
+    let mime = storage::mime_essence(headers.get(header::CONTENT_TYPE))
+        .ok_or_else(|| bad_request("invalid content-type"))?;
     let object = NewObject {
         bucket: &t.bucket,
         name: &t.key,
         mime: &mime,
         upsert: true,
     };
-    let id = object
-        .store(storage, caller, received.size, &received.path)
-        .await?;
+    let limit = object.limit(&st.storage).await?;
+    object.check(&st.storage, caller).await?;
+    tus::sweep(&st.storage).await;
+
+    let id = Uuid::new_v4();
+    let dir = upload_dir(st, id);
+    tokio::fs::create_dir(&dir).await.map_err(io_error)?;
+    let meta = Multipart {
+        bucket: t.bucket.clone(),
+        name: t.key.clone(),
+        mime,
+        limit,
+        role: caller.role.to_owned(),
+        sub: caller_sub(caller),
+    };
+    let raw = serde_json::to_vec(&meta).map_err(|e| io_error(std::io::Error::other(e)))?;
+    tokio::fs::write(dir.join("meta.json"), raw)
+        .await
+        .map_err(io_error)?;
+    Ok(xml_response(format!(
+        r#"<InitiateMultipartUploadResult xmlns="{XMLNS}"><Bucket>{}</Bucket><Key>{}</Key><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"#,
+        xml(&t.bucket),
+        xml(&t.key)
+    )))
+}
+
+async fn upload_part(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let checked = async {
+        t.only_params(&["partNumber", "uploadId"])?;
+        let part = t
+            .param("partNumber")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|n| (1..=MAX_PARTS).contains(n))
+            .ok_or_else(|| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    "partNumber must be between 1 and 10000",
+                )
+            })?;
+        let (dir, meta) = open_upload(st, caller, t).await?;
+        if declared_length(headers).is_some_and(|len| len > meta.limit) {
+            return Err(storage::too_large().into());
+        }
+        Ok((part, dir, meta.limit))
+    }
+    .await;
+    let (part, dir, limit) = match checked {
+        Ok(v) => v,
+        Err(e) => return Err(storage::drain(body, e).await),
+    };
+    let received = receive_payload(st, headers, body, limit).await?;
+    // Fails if the upload was completed or aborted meanwhile; the temp file is then dropped.
+    tokio::fs::rename(&received.path, dir.join(format!("part-{part:05}")))
+        .await
+        .map_err(|_| no_such_upload())?;
+    let size = received.size;
     received.keep();
     let mut res = StatusCode::OK.into_response();
-    if let Ok(v) = HeaderValue::from_str(&format!("\"{id}\"")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("\"{part}-{size}\"")) {
         res.headers_mut().insert(header::ETAG, v);
     }
     Ok(res)
+}
+
+/// Part numbers from a CompleteMultipartUpload body, in the order given.
+fn completed_parts(body: &str) -> Option<Vec<u32>> {
+    body.split("<PartNumber>")
+        .skip(1)
+        .map(|s| s.split("</PartNumber>").next()?.trim().parse().ok())
+        .collect()
+}
+
+async fn complete_multipart(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let opened = async {
+        t.only_params(&["uploadId"])?;
+        open_upload(st, caller, t).await
+    }
+    .await;
+    let (dir, meta) = match opened {
+        Ok(v) => v,
+        Err(e) => return Err(storage::drain(body, e).await),
+    };
+    let malformed = || {
+        err(
+            StatusCode::BAD_REQUEST,
+            "MalformedXML",
+            "the part list is not valid",
+        )
+    };
+    let raw = http_body_util::Limited::new(body, 1024 * 1024)
+        .collect()
+        .await
+        .map_err(|_| malformed())?
+        .to_bytes();
+    let parts = std::str::from_utf8(&raw)
+        .ok()
+        .and_then(completed_parts)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(malformed)?;
+    if !parts.windows(2).all(|w| w[0] < w[1]) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "InvalidPartOrder",
+            "parts must be listed in ascending order",
+        ));
+    }
+    let files: Vec<PathBuf> = parts
+        .iter()
+        .map(|n| dir.join(format!("part-{n:05}")))
+        .collect();
+    let assembled = storage::assemble(&st.storage, &files, meta.limit)
+        .await
+        .map_err(|e| {
+            if e.code() == "not_found" {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidPart",
+                    "a listed part was not uploaded",
+                )
+            } else {
+                e.into()
+            }
+        })?;
+    let object = NewObject {
+        bucket: &meta.bucket,
+        name: &meta.name,
+        mime: &meta.mime,
+        upsert: true,
+    };
+    let id = object
+        .store(&st.storage, caller, assembled.size, &assembled.path)
+        .await?;
+    assembled.keep();
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(xml_response(format!(
+        r#"<CompleteMultipartUploadResult xmlns="{XMLNS}"><Bucket>{}</Bucket><Key>{}</Key><ETag>&quot;{id}&quot;</ETag></CompleteMultipartUploadResult>"#,
+        xml(&t.bucket),
+        xml(&t.key)
+    )))
+}
+
+async fn abort_multipart(st: &AppState, caller: &Caller, t: &Target) -> Result<Response, S3Error> {
+    t.only_params(&["uploadId"])?;
+    let (dir, _) = open_upload(st, caller, t).await?;
+    tokio::fs::remove_dir_all(&dir).await.map_err(io_error)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// S3 answers 204 whether or not the key existed.
@@ -1092,6 +1369,14 @@ mod tests {
             ))
         );
         assert_eq!(parse_authorization("AWS4-HMAC-SHA256 Credential=AK"), None);
+    }
+
+    #[test]
+    fn completed_part_lists() {
+        let body = "<CompleteMultipartUpload><Part><ETag>\"1-5\"</ETag><PartNumber>1</PartNumber></Part><Part><PartNumber> 2 </PartNumber></Part></CompleteMultipartUpload>";
+        assert_eq!(completed_parts(body), Some(vec![1, 2]));
+        assert_eq!(completed_parts("<CompleteMultipartUpload/>"), Some(vec![]));
+        assert_eq!(completed_parts("<PartNumber>x</PartNumber>"), None);
     }
 
     #[test]

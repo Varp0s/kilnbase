@@ -147,7 +147,7 @@ impl Drop for Busy<'_> {
     }
 }
 
-async fn sweep(storage: &Storage) {
+pub(crate) async fn sweep(storage: &Storage) {
     let Ok(mut entries) = tokio::fs::read_dir(storage.dir.join("uploads")).await else {
         return;
     };

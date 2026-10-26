@@ -217,8 +217,8 @@ s3 = boto3.client("s3", endpoint_url="http://localhost:8000/storage/v1/s3", regi
                   config=Config(signature_version="s3v4", s3={"addressing_style": "path"}))
 ```
 
-Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/DeleteObject and SigV4 presigned URLs.
-Multipart uploads, copies, batch deletes, ACLs and tagging answer `NotImplemented`. A TLS proxy in front must
+Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/DeleteObject, multipart uploads and SigV4
+presigned URLs. Copies, batch deletes, ACLs and tagging answer `NotImplemented`. A TLS proxy in front must
 keep the `Host` header, which is part of the signature.
 
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
