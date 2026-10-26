@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import doctor, gen_types, init
+from . import doctor, gen_types, init, rotate_keys
 
 
 def main() -> None:
@@ -26,6 +26,14 @@ def main() -> None:
     types_cmd.add_argument("--schema", default="public")
     types_cmd.add_argument("-o", "--output", type=Path, help="write here instead of stdout")
 
+    rotate_cmd = commands.add_parser(
+        "rotate-keys", help="switch to a new JWT signing key without downtime"
+    )
+    rotate_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+    rotate_cmd.add_argument(
+        "--retire", action="store_true", help="drop keys that no longer sign from the JWKS"
+    )
+
     args = parser.parse_args()
     if args.command == "init":
         sys.exit(init.run(args.env_file, args.force))
@@ -33,6 +41,8 @@ def main() -> None:
         sys.exit(doctor.run(args.env_file, args.skip_db))
     if args.command == "gen":
         sys.exit(gen_types.run(args.env_file, args.schema, args.output))
+    if args.command == "rotate-keys":
+        sys.exit(rotate_keys.run(args.env_file, args.retire))
 
 
 if __name__ == "__main__":

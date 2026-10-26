@@ -27,6 +27,17 @@ tables reachable without RLS (for example after a manual `GRANT`), views that by
 policies for `anon`, `SECURITY DEFINER` functions callable from the API, and public buckets. Exits non-zero on
 anything blocking, so it fits in CI.
 
+### Rotating keys
+
+```sh
+uv run kilnbase rotate-keys && docker compose up -d            # new signing key, old one still accepted
+# ...hand the new KILNBASE_ANON_KEY / KILNBASE_SERVICE_ROLE_KEY to your apps, wait at least 1 hour...
+uv run kilnbase rotate-keys --retire && docker compose up -d   # stop accepting the old key
+```
+
+Rotation never logs anyone out: the JWKS keeps the previous public keys, so existing sessions and the old API
+keys stay valid until `--retire`. `.env` is rewritten atomically and keeps its file permissions.
+
 ### TypeScript types
 
 ```sh
