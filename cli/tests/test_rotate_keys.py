@@ -67,3 +67,22 @@ def test_broken_file_is_not_touched(tmp_path):
     env_file.write_text("KILNBASE_JWKS=nope\n", encoding="utf-8")
     assert run(env_file, retire=False) == 1
     assert env_file.read_text(encoding="utf-8") == "KILNBASE_JWKS=nope\n"
+
+
+def test_s3_rotation_replaces_only_the_s3_pair():
+    original = generate_env()
+    before = parse_env(original)
+    after = parse_env(rotate(original, s3=True)[0])
+    assert after["KILNBASE_S3_ACCESS_KEY_ID"] != before["KILNBASE_S3_ACCESS_KEY_ID"]
+    assert after["KILNBASE_S3_SECRET_ACCESS_KEY"] != before["KILNBASE_S3_SECRET_ACCESS_KEY"]
+    s3 = {"KILNBASE_S3_ACCESS_KEY_ID", "KILNBASE_S3_SECRET_ACCESS_KEY"}
+    assert {k: v for k, v in after.items() if k not in s3} == {
+        k: v for k, v in before.items() if k not in s3
+    }
+
+
+def test_s3_rotation_adds_the_pair_to_older_env_files():
+    old = "".join(line + "\n" for line in generate_env().splitlines() if "S3" not in line)
+    env = parse_env(rotate(old.rstrip("\n"), s3=True)[0])
+    assert env["KILNBASE_S3_ACCESS_KEY_ID"].startswith("kb_")
+    assert env["POSTGRES_PASSWORD"] == parse_env(old)["POSTGRES_PASSWORD"]

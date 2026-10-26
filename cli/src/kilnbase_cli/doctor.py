@@ -41,6 +41,7 @@ def check_env(env: dict[str, str], mode: int | None) -> list[Finding]:
     anon = env.get("KILNBASE_ANON_KEY")
     if anon and anon == env.get("KILNBASE_SERVICE_ROLE_KEY"):
         findings.append(Finding("fail", "anon and service_role keys are identical"))
+    findings += check_s3_keys(env)
     # Group/other permission bits on the secrets file (POSIX only; Windows reports no useful bits).
     if mode is not None and mode & 0o077:
         findings.append(
@@ -53,6 +54,31 @@ def check_env(env: dict[str, str], mode: int | None) -> list[Finding]:
             Finding("info", "CORS allows any origin; set KILNBASE_CORS_ORIGINS for production")
         )
     return findings
+
+
+def check_s3_keys(env: dict[str, str]) -> list[Finding]:
+    """The optional S3 key pair acts as service_role; core refuses to start on the first two."""
+    key_id = env.get("KILNBASE_S3_ACCESS_KEY_ID", "")
+    secret = env.get("KILNBASE_S3_SECRET_ACCESS_KEY", "")
+    if bool(key_id) != bool(secret):
+        return [
+            Finding(
+                "fail",
+                "set both KILNBASE_S3_ACCESS_KEY_ID and KILNBASE_S3_SECRET_ACCESS_KEY, or neither",
+            )
+        ]
+    if not secret:
+        return []
+    if secret == PLACEHOLDER or len(secret) < 32:
+        return [
+            Finding(
+                "fail",
+                "KILNBASE_S3_SECRET_ACCESS_KEY is the example value or shorter than 32 characters",
+            )
+        ]
+    if any(v == secret for k, v in env.items() if k != "KILNBASE_S3_SECRET_ACCESS_KEY"):
+        return [Finding("warn", "KILNBASE_S3_SECRET_ACCESS_KEY reuses another secret from .env")]
+    return []
 
 
 # Static, parameterless audit query in one round trip; each row is one risky object.

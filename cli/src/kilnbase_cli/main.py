@@ -30,8 +30,12 @@ def main() -> None:
         "rotate-keys", help="switch to a new JWT signing key without downtime"
     )
     rotate_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
-    rotate_cmd.add_argument(
+    rotate_mode = rotate_cmd.add_mutually_exclusive_group()
+    rotate_mode.add_argument(
         "--retire", action="store_true", help="drop keys that no longer sign from the JWKS"
+    )
+    rotate_mode.add_argument(
+        "--s3", action="store_true", help="replace only the S3 key pair (no overlap period)"
     )
 
     backup_cmd = commands.add_parser("backup", help="archive the database and stored files")
@@ -51,7 +55,7 @@ def main() -> None:
     if args.command == "gen":
         sys.exit(gen_types.run(args.env_file, args.schema, args.output))
     if args.command == "rotate-keys":
-        sys.exit(rotate_keys.run(args.env_file, args.retire))
+        sys.exit(rotate_keys.run(args.env_file, args.retire, args.s3))
     if args.command == "backup":
         sys.exit(backup.backup(args.env_file, args.output))
     if args.command == "restore":

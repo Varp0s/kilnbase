@@ -4,14 +4,39 @@ import tempfile
 from pathlib import Path
 
 from .doctor import parse_env
-from .init import api_key, new_signing_key, public_jwk, quoted_json
+from .init import api_key, new_s3_keys, new_signing_key, public_jwk, quoted_json
 
 ACCESS_TOKEN_LIFETIME_HOURS = 1  # matches the auth service's access token lifetime
 
 
-def rotate(text: str, retire: bool = False) -> tuple[str, str]:
+def rotate(text: str, retire: bool = False, s3: bool = False) -> tuple[str, str]:
     """Returns the new env file text and a summary; raises ValueError on an unusable file."""
-    env = parse_env(text)
+    if s3:
+        updates = new_s3_keys()
+        summary = (
+            f"New S3 key pair {updates['KILNBASE_S3_ACCESS_KEY_ID']}. Core accepts one pair, so "
+            "the old one stops working when the stack restarts: update your S3 clients then."
+        )
+    else:
+        updates, summary = signing_key_updates(parse_env(text), retire)
+
+    lines = text.splitlines(keepends=True)
+    missing = set(updates)
+    for i, line in enumerate(lines):
+        key = line.split("=", 1)[0].strip()
+        if key in updates and not line.startswith("#"):
+            lines[i] = f"{key}={updates[key]}\n"
+            missing.discard(key)
+    if missing and not s3:
+        raise ValueError(f"missing from the env file: {', '.join(sorted(missing))}")
+    # Env files from before the S3 API have no S3 lines yet.
+    if missing and lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines += [f"{k}={v}\n" for k, v in updates.items() if k in missing]
+    return "".join(lines), summary
+
+
+def signing_key_updates(env: dict[str, str], retire: bool) -> tuple[dict[str, str], str]:
     try:
         active = json.loads(env["KILNBASE_JWT_PRIVATE_JWK"])
         published = json.loads(env["KILNBASE_JWKS"])["keys"]
@@ -46,17 +71,7 @@ def rotate(text: str, retire: bool = False) -> tuple[str, str]:
             f"at least {ACCESS_TOKEN_LIFETIME_HOURS} hour (the access token lifetime) and run "
             "`kilnbase rotate-keys --retire`."
         )
-
-    lines = text.splitlines(keepends=True)
-    missing = set(updates)
-    for i, line in enumerate(lines):
-        key = line.split("=", 1)[0].strip()
-        if key in updates and not line.startswith("#"):
-            lines[i] = f"{key}={updates[key]}\n"
-            missing.discard(key)
-    if missing:
-        raise ValueError(f"missing from the env file: {', '.join(sorted(missing))}")
-    return "".join(lines), summary
+    return updates, summary
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -72,12 +87,12 @@ def write_atomic(path: Path, text: str) -> None:
         raise
 
 
-def run(env_file: Path, retire: bool) -> int:
+def run(env_file: Path, retire: bool, s3: bool = False) -> int:
     if not env_file.exists():
         print(f"{env_file} not found; run `kilnbase init`")
         return 1
     try:
-        text, summary = rotate(env_file.read_text(encoding="utf-8"), retire)
+        text, summary = rotate(env_file.read_text(encoding="utf-8"), retire, s3)
     except ValueError as e:
         print(f"rotate-keys: {e}")
         return 1

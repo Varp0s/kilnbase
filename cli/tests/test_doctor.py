@@ -42,3 +42,27 @@ def test_db_rows_map_to_levels():
         {"kind": "public_bucket", "name": "avatars"},
     ]
     assert levels(check_db(rows)) == ["fail", "warn", "info"]
+
+
+def s3_findings(**values):
+    env = parse_env(generate_env()) | values
+    return [(f.level, f.message) for f in check_env(env, mode=None) if "S3" in f.message]
+
+
+def test_init_s3_pair_passes():
+    env = parse_env(generate_env())
+    assert env["KILNBASE_S3_ACCESS_KEY_ID"].startswith("kb_")
+    # core requires a secret of at least 32 characters that is not the placeholder
+    assert len(env["KILNBASE_S3_SECRET_ACCESS_KEY"]) >= 32
+    assert s3_findings() == []
+
+
+def test_s3_pair_problems():
+    assert s3_findings(KILNBASE_S3_SECRET_ACCESS_KEY="")[0][0] == "fail"
+    assert s3_findings(KILNBASE_S3_ACCESS_KEY_ID="", KILNBASE_S3_SECRET_ACCESS_KEY="") == []
+    assert s3_findings(KILNBASE_S3_SECRET_ACCESS_KEY="change-me")[0][0] == "fail"
+    assert s3_findings(KILNBASE_S3_SECRET_ACCESS_KEY="x" * 31)[0][0] == "fail"
+    shared = parse_env(generate_env())["KILNBASE_STORAGE_SIGNING_KEY"]
+    env = parse_env(generate_env()) | {"KILNBASE_STORAGE_SIGNING_KEY": shared}
+    env["KILNBASE_S3_SECRET_ACCESS_KEY"] = shared
+    assert [f.level for f in check_env(env, mode=None) if "S3" in f.message] == ["warn"]
