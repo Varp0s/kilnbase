@@ -80,6 +80,11 @@ services:
       KILNBASE_CORS_ORIGINS: ${KILNBASE_CORS_ORIGINS:-*}
       # Image transformations: set to http://imgproxy:8080 and start with COMPOSE_PROFILES=images.
       KILNBASE_IMGPROXY_URL: ${KILNBASE_IMGPROXY_URL:-}
+      # S3-compatible API: this key pair acts as service_role (servers only). Users can always sign
+      # with their access token as the session token.
+      KILNBASE_S3_ACCESS_KEY_ID: ${KILNBASE_S3_ACCESS_KEY_ID:-}
+      KILNBASE_S3_SECRET_ACCESS_KEY: ${KILNBASE_S3_SECRET_ACCESS_KEY:-}
+      KILNBASE_S3_REGION: ${KILNBASE_S3_REGION:-us-east-1}
     volumes:
       - storage-data:/data
     ports:

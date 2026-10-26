@@ -66,6 +66,11 @@ pub fn authorize_tokens(
     }
 }
 
+/// Verifies a single access token (S3 session tokens arrive without an `apikey`).
+pub fn verify_token(keys: &HashMap<String, DecodingKey>, token: &str) -> Result<Caller, ApiError> {
+    verify(keys, token, REQUEST_ROLES)
+}
+
 impl Caller {
     /// True once the token's `exp` has passed; long-lived connections must re-check this.
     pub fn expired(&self) -> bool {

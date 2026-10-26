@@ -1,0 +1,173 @@
+"""S3-compatible API, exercised with a real S3 client (boto3) rather than our own signer."""
+
+import uuid
+
+import boto3
+import httpx2 as httpx
+import pytest
+from botocore.config import Config
+from botocore.exceptions import ClientError
+from conftest import BASE_URL, psql
+from test_storage import POLICIES
+
+ENDPOINT = f"{BASE_URL}/storage/v1/s3"
+# Matches docker-compose.test.yml.
+SERVICE_KEY = ("e2e-s3-key", "e2e-s3-secret-0123456789abcdef0123456789")
+
+
+def s3(key_id: str, secret: str, token: str | None = None):
+    return boto3.client(
+        "s3",
+        endpoint_url=ENDPOINT,
+        region_name="us-east-1",
+        aws_access_key_id=key_id,
+        aws_secret_access_key=secret,
+        aws_session_token=token,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            retries={"max_attempts": 1},
+        ),
+    )
+
+
+def user_client(keys):
+    """Users sign with their access token as both secret and session token."""
+    _, token = keys.user()
+    return s3("user", token, token)
+
+
+def code(exc: pytest.ExceptionInfo) -> str:
+    return exc.value.response["Error"]["Code"]
+
+
+@pytest.fixture(scope="module")
+def service():
+    return s3(*SERVICE_KEY)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def buckets(client, keys):
+    psql(POLICIES)
+    for body in (
+        {"id": "e2e-s3"},
+        {"id": "e2e-s3-small", "file_size_limit": 16},
+    ):
+        r = client.post("/storage/v1/bucket", headers={"apikey": keys.service_role}, json=body)
+        assert r.status_code == 201, r.text
+
+
+@pytest.mark.parametrize("key", ["plain.txt", "dir/with space.txt", "ünïcode/ğ.txt", "a+b=c&d.txt"])
+def test_service_round_trip(service, key):
+    key = f"{uuid.uuid4().hex}/{key}"
+    put = service.put_object(Bucket="e2e-s3", Key=key, Body=b"0123456789", ContentType="text/plain")
+    assert put["ETag"]
+
+    got = service.get_object(Bucket="e2e-s3", Key=key)
+    assert got["Body"].read() == b"0123456789"
+    assert got["ContentType"] == "text/plain"
+    assert got["ContentLength"] == 10
+
+    head = service.head_object(Bucket="e2e-s3", Key=key)
+    assert head["ContentLength"] == 10
+    assert head["ETag"] == put["ETag"]
+
+    part = service.get_object(Bucket="e2e-s3", Key=key, Range="bytes=2-4")
+    assert part["Body"].read() == b"234"
+    assert part["ContentRange"] == "bytes 2-4/10"
+
+    service.delete_object(Bucket="e2e-s3", Key=key)
+    with pytest.raises(ClientError) as e:
+        service.head_object(Bucket="e2e-s3", Key=key)
+    assert e.value.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+    # Deleting a missing key succeeds, as on S3.
+    service.delete_object(Bucket="e2e-s3", Key=key)
+
+
+def test_rls_decides_for_users(keys):
+    a, b = user_client(keys), user_client(keys)
+    key = f"{uuid.uuid4().hex}.txt"
+    a.put_object(Bucket="e2e-s3", Key=key, Body=b"mine")
+    assert a.get_object(Bucket="e2e-s3", Key=key)["Body"].read() == b"mine"
+
+    with pytest.raises(ClientError) as e:
+        b.get_object(Bucket="e2e-s3", Key=key)
+    assert code(e) == "NoSuchKey"
+    assert key not in [o["Key"] for o in b.list_objects_v2(Bucket="e2e-s3").get("Contents", [])]
+    assert key in [o["Key"] for o in a.list_objects_v2(Bucket="e2e-s3")["Contents"]]
+    with pytest.raises(ClientError) as e:
+        b.put_object(Bucket="e2e-s3", Key=key, Body=b"overwrite")
+    assert code(e) == "AccessDenied"
+    b.delete_object(Bucket="e2e-s3", Key=key)
+    assert a.get_object(Bucket="e2e-s3", Key=key)["Body"].read() == b"mine"
+
+
+def test_listing_with_prefix_delimiter_and_pages(service):
+    root = uuid.uuid4().hex
+    for name in ["a.txt", "b.txt", "c.txt", "dir1/x.txt", "dir1/y.txt", "dir2/z.txt"]:
+        service.put_object(Bucket="e2e-s3", Key=f"{root}/{name}", Body=b"x")
+
+    r = service.list_objects_v2(Bucket="e2e-s3", Prefix=f"{root}/", Delimiter="/")
+    assert [o["Key"] for o in r["Contents"]] == [f"{root}/{n}" for n in ("a.txt", "b.txt", "c.txt")]
+    assert [p["Prefix"] for p in r["CommonPrefixes"]] == [f"{root}/dir1/", f"{root}/dir2/"]
+
+    seen, token = [], None
+    while True:
+        extra = {"ContinuationToken": token} if token else {}
+        page = service.list_objects_v2(Bucket="e2e-s3", Prefix=f"{root}/", MaxKeys=2, **extra)
+        seen += [o["Key"] for o in page.get("Contents", [])]
+        if not page["IsTruncated"]:
+            break
+        token = page["NextContinuationToken"]
+    assert len(seen) == 6 and seen == sorted(seen)
+
+    with pytest.raises(ClientError) as e:
+        service.list_objects_v2(Bucket="e2e-s3-missing")
+    assert code(e) == "NoSuchBucket"
+
+
+def test_presigned_urls(service):
+    key = f"{uuid.uuid4().hex}/shared file.txt"
+    put_url = service.generate_presigned_url(
+        "put_object", Params={"Bucket": "e2e-s3", "Key": key}, ExpiresIn=60
+    )
+    assert httpx.put(put_url, content=b"via presigned put").status_code == 200
+
+    url = service.generate_presigned_url(
+        "get_object", Params={"Bucket": "e2e-s3", "Key": key}, ExpiresIn=60
+    )
+    r = httpx.get(url)
+    assert r.status_code == 200
+    assert r.content == b"via presigned put"
+
+    tampered = url.replace("X-Amz-Expires=60", "X-Amz-Expires=600")
+    assert httpx.get(tampered).status_code == 403
+
+
+def test_bad_credentials_are_rejected(keys):
+    with pytest.raises(ClientError) as e:
+        s3(SERVICE_KEY[0], "wrong-secret").list_buckets()
+    assert code(e) == "SignatureDoesNotMatch"
+    with pytest.raises(ClientError) as e:
+        s3("unknown", "whatever").list_buckets()
+    assert code(e) == "InvalidAccessKeyId"
+    with pytest.raises(ClientError) as e:
+        s3("user", "not-a-token", "not-a-token").list_buckets()
+    assert code(e) == "InvalidToken"
+    _, token = keys.user()
+    with pytest.raises(ClientError) as e:
+        s3("user", "a-different-secret", token).list_buckets()
+    assert code(e) == "SignatureDoesNotMatch"
+
+
+def test_limits_and_unsupported_operations(service):
+    with pytest.raises(ClientError) as e:
+        service.put_object(Bucket="e2e-s3-small", Key="big.bin", Body=b"x" * 64)
+    assert code(e) == "EntityTooLarge"
+    with pytest.raises(ClientError) as e:
+        service.create_multipart_upload(Bucket="e2e-s3", Key="multi.bin")
+    assert code(e) == "NotImplemented"
+    with pytest.raises(ClientError) as e:
+        service.get_object_acl(Bucket="e2e-s3", Key="anything")
+    assert code(e) == "NotImplemented"
+    assert "e2e-s3" in [b["Name"] for b in service.list_buckets()["Buckets"]]

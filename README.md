@@ -190,6 +190,24 @@ From the JS client: `download(path, { transform: { width: 200 } })` or `getPubli
 
 The same RLS check as a download decides access; imgproxy only reads stored files and is reachable from `core` alone.
 
+Existing S3 tools and SDKs work against `http://localhost:8000/storage/v1/s3` (path-style addressing,
+SigV4, region `us-east-1` unless `KILNBASE_S3_REGION` says otherwise). Two kinds of credentials:
+
+- **Servers:** set `KILNBASE_S3_ACCESS_KEY_ID` and `KILNBASE_S3_SECRET_ACCESS_KEY` (32+ characters); that pair
+  acts as `service_role`, so never ship it to clients.
+- **Users:** any access key id, with the user's access token as both the secret key and the session token;
+  RLS decides exactly as for the native API.
+
+```python
+s3 = boto3.client("s3", endpoint_url="http://localhost:8000/storage/v1/s3", region_name="us-east-1",
+                  aws_access_key_id="user", aws_secret_access_key=access_token, aws_session_token=access_token,
+                  config=Config(signature_version="s3v4", s3={"addressing_style": "path"}))
+```
+
+Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/DeleteObject and SigV4 presigned URLs.
+Multipart uploads, copies, batch deletes, ACLs and tagging answer `NotImplemented`. A TLS proxy in front must
+keep the `Host` header, which is part of the signature.
+
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:
 
 ```sql

@@ -22,6 +22,9 @@ First release candidate (planned as 0.1.0).
   buckets, HMAC-signed links; downloads are served with `nosniff` and a sandboxing CSP.
 - **Image transformations** (optional imgproxy service): resize, quality and format conversion at
   `/storage/v1/render/image/{authenticated,public}/…`, with the same access rules as downloads.
+- **S3-compatible API** at `/storage/v1/s3` (path-style, SigV4 headers and presigned URLs): list, head,
+  get with ranges, put (including `aws-chunked` bodies) and delete, with RLS applied to users who sign with
+  their access token; an optional server key pair acts as service_role.
 - **Resumable uploads** (tus 1.0 with creation and termination) at `/storage/v1/upload/resumable`: the
   policy and size limit are checked before any bytes arrive, uploads are private to their creator, and
   unfinished ones are removed after 24 hours.
@@ -56,7 +59,9 @@ First release candidate (planned as 0.1.0).
 - Example todo app, k6 benchmark (`docs/benchmarks.md`).
 
 ### Known limitations
-- Realtime delivery is at-most-once; changes during a reconnect are lost. `DELETE` events carry only the
-  primary key and reach every subscriber of the table.
+- Realtime replays missed changes for up to 10 minutes; longer gaps answer `resync_required`. `DELETE` events
+  carry only the primary key and reach every subscriber of the table.
+- The S3 API has no multipart uploads yet, so tools switch to plain uploads only below their multipart
+  threshold (8 MB for the AWS CLI); `aws-chunked` signatures and checksum trailers are not verified.
 - Auth rate limits are kept in memory per auth replica.
 - An access token stays valid at the REST API until it expires (at most one hour) after sign-out.

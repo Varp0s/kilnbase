@@ -5,6 +5,7 @@ mod db;
 mod error;
 mod proxy;
 mod realtime;
+mod s3;
 mod storage;
 mod tus;
 
@@ -57,6 +58,8 @@ async fn main() -> ExitCode {
             cfg.storage_signing_key.as_bytes(),
         ),
         imgproxy_url: cfg.imgproxy_url,
+        s3_region: cfg.s3_region,
+        s3_keys: cfg.s3_keys,
         busy_uploads: Default::default(),
     };
     if let Err(e) = storage.prepare_dirs().await {
@@ -117,6 +120,9 @@ async fn main() -> ExitCode {
                 .put(storage::upload)
                 .delete(storage::delete),
         )
+        .route("/storage/v1/s3", any(s3::handle))
+        .route("/storage/v1/s3/", any(s3::handle))
+        .route("/storage/v1/s3/{*rest}", any(s3::handle))
         .merge(resumable)
         .layer(cors)
         .with_state(state);

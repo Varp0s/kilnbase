@@ -15,6 +15,8 @@ pub struct Config {
     pub storage_max_file_size: u64,
     pub storage_signing_key: String,
     pub imgproxy_url: Option<String>,
+    pub s3_region: String,
+    pub s3_keys: Option<(String, String)>,
     /// `None` means any origin.
     pub cors_origins: Option<Vec<String>>,
     /// Verification keys by `kid`; the gateway never holds a signing key.
@@ -76,6 +78,20 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     let imgproxy_url = get("KILNBASE_IMGPROXY_URL")
         .map(|u| u.trim().trim_end_matches('/').to_owned())
         .filter(|u| !u.is_empty());
+    let s3_region = get("KILNBASE_S3_REGION").unwrap_or_else(|| "us-east-1".into());
+    // Optional: without a key pair the S3 API still serves users signing with their access token.
+    let s3_keys = match (
+        get("KILNBASE_S3_ACCESS_KEY_ID").filter(|v| !v.is_empty()),
+        get("KILNBASE_S3_SECRET_ACCESS_KEY").filter(|v| !v.is_empty()),
+    ) {
+        (None, None) => None,
+        (Some(id), Some(secret)) if secret.len() >= 32 && secret != PLACEHOLDER => {
+            Some((id, secret))
+        }
+        _ => {
+            return Err("KILNBASE_S3_ACCESS_KEY_ID and KILNBASE_S3_SECRET_ACCESS_KEY must be set together, with a secret of at least 32 characters".into());
+        }
+    };
     let storage_max_file_size = match get("KILNBASE_STORAGE_MAX_FILE_SIZE") {
         None => 50 * 1024 * 1024,
         Some(v) => v
@@ -92,6 +108,8 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         storage_max_file_size,
         storage_signing_key,
         imgproxy_url,
+        s3_region,
+        s3_keys,
         cors_origins,
         keys,
     })
@@ -181,6 +199,11 @@ aXh731/prgSjHJQkHEVDIcvpTjmqYxdgY4pcnn8l0k6u/TanBK5xyb2S
             ("KILNBASE_STORAGE_SIGNING_KEY", "too-short"),
             ("KILNBASE_STORAGE_MAX_FILE_SIZE", "lots"),
             ("KILNBASE_PORT", "99999"),
+            ("KILNBASE_S3_ACCESS_KEY_ID", "only-the-id"),
+            (
+                "KILNBASE_S3_SECRET_ACCESS_KEY",
+                "only-a-secret-that-is-long-enough!!",
+            ),
         ] {
             assert!(load(valid(&[(k, v)])).is_err(), "{k}={v}");
         }

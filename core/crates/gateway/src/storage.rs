@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::hmac;
 use axum::Json;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,10 @@ pub struct Storage {
     pub signing_key: hmac::Key,
     /// Image transformations are off unless an imgproxy instance is configured.
     pub imgproxy_url: Option<String>,
+    /// Region S3 clients must sign for.
+    pub s3_region: String,
+    /// Access key id and secret that act as service_role over the S3 API.
+    pub s3_keys: Option<(String, String)>,
     /// Resumable uploads currently receiving a PATCH.
     pub busy_uploads: std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>,
 }
@@ -40,7 +44,7 @@ impl Storage {
         tokio::fs::create_dir_all(self.dir.join("objects")).await
     }
 
-    fn object_path(&self, id: &str) -> PathBuf {
+    pub(crate) fn object_path(&self, id: &str) -> PathBuf {
         // Files are named by the database-generated UUID, never by the user-supplied name.
         self.dir.join("objects").join(id)
     }
@@ -119,6 +123,49 @@ impl Drop for TempFile {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// An uploaded body in a temp file, deleted on drop unless `keep` is called after it was stored.
+pub(crate) struct Received {
+    tmp: TempFile,
+    pub path: PathBuf,
+    pub size: u64,
+}
+
+impl Received {
+    pub fn keep(self) {
+        self.tmp.keep();
+    }
+}
+
+/// Streams `body` to a temp file, enforcing `limit` as bytes arrive rather than trusting headers.
+/// `filter` sees every frame first (S3 uses it to strip aws-chunked framing and hash the payload).
+pub(crate) async fn receive(
+    storage: &Storage,
+    mut body: Body,
+    limit: u64,
+    mut filter: impl FnMut(Bytes) -> Result<Bytes, ApiError>,
+) -> Result<Received, ApiError> {
+    let path = storage
+        .dir
+        .join("tmp")
+        .join(uuid::Uuid::new_v4().to_string());
+    let tmp = TempFile(Some(path.clone()));
+    let mut file = tokio::fs::File::create(&path).await.map_err(io_error)?;
+    let mut size: u64 = 0;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| bad_request("upload interrupted"))?;
+        if let Ok(data) = frame.into_data() {
+            let data = filter(data)?;
+            size += data.len() as u64;
+            if size > limit {
+                return Err(too_large());
+            }
+            file.write_all(&data).await.map_err(io_error)?;
+        }
+    }
+    file.sync_all().await.map_err(io_error)?;
+    Ok(Received { tmp, path, size })
 }
 
 struct BucketSettings {
@@ -228,7 +275,7 @@ impl NewObject<'_> {
 
 /// Reads a small rejected body before answering: closing with unread bytes sends a TCP reset,
 /// and the client would see a broken connection instead of the error.
-pub(crate) async fn drain(body: Body, e: ApiError) -> ApiError {
+pub(crate) async fn drain<E>(body: Body, e: E) -> E {
     let limited = http_body_util::Limited::new(body, 64 * 1024);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), limited.collect()).await;
     e
@@ -240,7 +287,7 @@ pub async fn upload(
     Path((bucket, name)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, ApiError> {
-    let (parts, mut body) = req.into_parts();
+    let (parts, body) = req.into_parts();
     let upsert = parts.method == Method::PUT;
     let checked = async {
         let caller = auth::authorize(&st.keys, &parts.headers)?;
@@ -275,29 +322,10 @@ pub async fn upload(
         upsert,
     };
 
-    // Stream to a temp file, enforcing the limit as bytes arrive rather than trusting headers.
-    let tmp_path = storage
-        .dir
-        .join("tmp")
-        .join(uuid::Uuid::new_v4().to_string());
-    let tmp = TempFile(Some(tmp_path.clone()));
-    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(io_error)?;
-    let mut size: u64 = 0;
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|_| bad_request("upload interrupted"))?;
-        if let Ok(data) = frame.into_data() {
-            size += data.len() as u64;
-            if size > limit {
-                return Err(too_large());
-            }
-            file.write_all(&data).await.map_err(io_error)?;
-        }
-    }
-    file.sync_all().await.map_err(io_error)?;
-    drop(file);
-
-    let id = object.store(storage, &caller, size, &tmp_path).await?;
-    tmp.keep();
+    let received = receive(storage, body, limit, Ok).await?;
+    let size = received.size;
+    let id = object.store(storage, &caller, size, &received.path).await?;
+    received.keep();
 
     Ok(
         Json(json!({ "id": id, "bucket": bucket, "name": name, "size": size, "mime_type": mime }))
@@ -329,8 +357,19 @@ pub async fn delete(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let caller = auth::authorize(&st.keys, &headers)?;
-    let mut client = db::client(&st.storage.pool).await?;
-    let tx = db::begin_as(&mut client, &caller).await?;
+    remove(&st.storage, &caller, &bucket, &name).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Deletes the row as `caller` (RLS decides), then the file; `not_found` if there was no row.
+pub(crate) async fn remove(
+    storage: &Storage,
+    caller: &Caller,
+    bucket: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    let mut client = db::client(&storage.pool).await?;
+    let tx = db::begin_as(&mut client, caller).await?;
     let row = tx
         .query_opt(
             "delete from storage.objects where bucket_id = $1 and name = $2 returning id::text",
@@ -341,12 +380,12 @@ pub async fn delete(
         .ok_or_else(not_found)?;
     tx.commit().await.map_err(db::internal)?;
     let id: String = row.get(0);
-    if let Err(e) = tokio::fs::remove_file(st.storage.object_path(&id)).await
+    if let Err(e) = tokio::fs::remove_file(storage.object_path(&id)).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
         eprintln!("kilnbase-core: could not remove object file {id}: {e}");
     }
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -477,7 +516,7 @@ async fn serve(
     Ok(res)
 }
 
-fn content_headers(h: &mut HeaderMap, cache: &'static str) {
+pub(crate) fn content_headers(h: &mut HeaderMap, cache: &'static str) {
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
     // Uploaded HTML/SVG must never run as script on the API's origin.
     h.insert(
@@ -650,17 +689,17 @@ fn signed_message(bucket: &str, name: &str, exp: u64) -> String {
     format!("{bucket}\n{name}\n{exp}")
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
     }

@@ -19,6 +19,18 @@ impl ApiError {
             message,
         }
     }
+
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &'static str {
+        self.message
+    }
 }
 
 impl IntoResponse for ApiError {
