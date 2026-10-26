@@ -1,0 +1,20 @@
+[project]
+name = "kilnbase-client"
+version = "0.0.0"
+description = "Python client for Kilnbase: auth, REST queries and storage"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.15"
+dependencies = [
+    "httpx2==2.16.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "kilnbase"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
