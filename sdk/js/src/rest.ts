@@ -13,7 +13,9 @@ export function listValue(v: Primitive): string {
  * Chainable query against `/rest/v1/<table>`; awaiting it runs the request.
  * Filters map one-to-one onto PostgREST operators.
  */
-export class Query<T = Record<string, unknown>> implements PromiseLike<Result<T[]>> {
+export class Query<T = Record<string, unknown>, Insert = Partial<T>, Update = Partial<T>>
+  implements PromiseLike<Result<T[]>>
+{
   #params = new URLSearchParams();
   #method: "GET" | "POST" | "PATCH" | "DELETE" = "GET";
   #body: unknown = undefined;
@@ -30,17 +32,17 @@ export class Query<T = Record<string, unknown>> implements PromiseLike<Result<T[
     return this;
   }
 
-  insert(rows: Partial<T> | Partial<T>[]): this {
+  insert(rows: Insert | Insert[]): this {
     return this.#write("POST", rows);
   }
 
   /** Insert, or update rows whose primary key already exists. */
-  upsert(rows: Partial<T> | Partial<T>[]): this {
+  upsert(rows: Insert | Insert[]): this {
     this.#prefer.push("resolution=merge-duplicates");
     return this.#write("POST", rows);
   }
 
-  update(values: Partial<T>): this {
+  update(values: Update): this {
     return this.#write("PATCH", values);
   }
 

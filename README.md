@@ -27,6 +27,15 @@ tables reachable without RLS (for example after a manual `GRANT`), views that by
 policies for `anon`, `SECURITY DEFINER` functions callable from the API, and public buckets. Exits non-zero on
 anything blocking, so it fits in CI.
 
+### TypeScript types
+
+```sh
+uv run kilnbase gen types -o src/database.ts   # stdout without -o; --schema to pick another schema
+```
+
+Writes a `Database` type (Row / Insert / Update per table, enums as unions) for every relation the API can
+read. Pass it to the client to type `from()`: `createClient<Database>(url, ANON_KEY)`.
+
 ### JavaScript / TypeScript client
 
 ```js

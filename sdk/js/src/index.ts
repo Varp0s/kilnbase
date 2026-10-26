@@ -18,19 +18,35 @@ export interface ClientOptions {
   storageKey?: string;
 }
 
-export interface KilnbaseClient {
+/** Shape of the `Database` type written by `kilnbase gen types`. */
+type PublicRelations<DB> = DB extends { public: { Tables: infer T; Views: infer V } } ? T & V : never;
+type Field<R, K extends string, Fallback> = R extends Record<K, infer F> ? F : Fallback;
+type TypedQuery<R> = Query<
+  Field<R, "Row", never>,
+  Field<R, "Insert", Partial<Field<R, "Row", never>>>,
+  Field<R, "Update", Partial<Field<R, "Row", never>>>
+>;
+
+export interface KilnbaseClient<DB = unknown> {
   auth: AuthClient;
   storage: StorageClient;
   realtime: RealtimeClient;
   /** Query a table in the `public` schema. */
-  from<T = Record<string, unknown>>(table: string): Query<T>;
+  from: [PublicRelations<DB>] extends [never]
+    ? <T = Record<string, unknown>>(table: string) => Query<T>
+    : <K extends keyof PublicRelations<DB> & string>(table: K) => TypedQuery<PublicRelations<DB>[K]>;
 }
 
 /**
  * @param url Base URL of the Kilnbase gateway, e.g. `http://localhost:8000`.
  * @param apiKey The **anon** key. Never ship the service_role key to browsers.
+ * @typeParam DB The `Database` type from `kilnbase gen types`, to type `from()` per table.
  */
-export function createClient(url: string, apiKey: string, options: ClientOptions = {}): KilnbaseClient {
+export function createClient<DB = unknown>(
+  url: string,
+  apiKey: string,
+  options: ClientOptions = {},
+): KilnbaseClient<DB> {
   const base = url.replace(/\/+$/, "");
   const storage =
     options.storage !== undefined
@@ -47,6 +63,6 @@ export function createClient(url: string, apiKey: string, options: ClientOptions
     auth,
     storage: new StorageClient(base, headers),
     realtime: new RealtimeClient(base, apiKey, auth),
-    from: <T = Record<string, unknown>>(table: string) => new Query<T>(base, table, headers),
+    from: ((table: string) => new Query(base, table, headers)) as KilnbaseClient<DB>["from"],
   };
 }

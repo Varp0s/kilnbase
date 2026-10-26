@@ -128,8 +128,9 @@ def check_db(rows: list[dict]) -> list[Finding]:
     return findings
 
 
-def query_db(root: Path) -> list[dict]:
-    """shortcut: audits through `docker compose exec`; add a --database-url mode for other hosts."""
+def query_db(root: Path, sql: str = AUDIT_SQL, **variables: str):
+    """shortcut: queries via `docker compose exec`; add a --database-url mode for other hosts."""
+    # psql variables let the SQL quote caller values itself (`:'name'`), never string formatting.
     argv = [
         "docker",
         "compose",
@@ -142,9 +143,10 @@ def query_db(root: Path) -> list[dict]:
         "-At",
         "-v",
         "ON_ERROR_STOP=1",
+        *(arg for k, v in variables.items() for arg in ("-v", f"{k}={v}")),
     ]
     out = subprocess.run(  # noqa: S603 - fixed argv, static SQL on stdin
-        argv, input=AUDIT_SQL, text=True, capture_output=True, check=True, cwd=root
+        argv, input=sql, text=True, encoding="utf-8", capture_output=True, check=True, cwd=root
     )
     return json.loads(out.stdout.strip() or "[]")
 
