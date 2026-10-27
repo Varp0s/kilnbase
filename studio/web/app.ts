@@ -52,6 +52,108 @@ interface Policy { name: string; command: string; roles: string[]; using: string
 interface TableInfo { name: string; rls: boolean; policies: Policy[] }
 interface User { id: string; email: string | null; created_at: string; is_anonymous: boolean }
 interface ViewAsResult { role: string; claims: Row; denied: boolean; rows: Row[] }
+interface Column { name: string; type: string; nullable: boolean; default: string | null; primary_key: boolean; read_only: boolean }
+interface RowsPage { columns: Column[]; key: string[]; rows: Row[] }
+
+const PAGE = 50;
+
+/** Inputs hold text; JSON and array columns are parsed, everything else is cast by Postgres. */
+function parseInput(column: Column, raw: string): Json {
+  return /(\[\]|json|jsonb)$/.test(column.type) ? (JSON.parse(raw) as Json) : raw;
+}
+
+/** One table's rows, a page at a time, with add / edit / delete where it has a primary key. */
+function dataEditor(name: string): HTMLElement {
+  const box = el("div");
+  let offset = 0;
+
+  const write = (action: string, body: unknown) =>
+    api<{ row: Row }>(`/api/tables/${encodeURIComponent(name)}/rows?action=${action}`, body);
+
+  function rowForm(page: RowsPage, row: Row | null): HTMLFormElement {
+    const inputs = new Map<string, HTMLInputElement>();
+    const fields = page.columns.map((c) => {
+      const input = el("input", {
+        value: row ? text(row[c.name]) : "",
+        placeholder: row ? "" : (c.default ?? (c.nullable ? "null" : "required")),
+        disabled: c.read_only,
+      });
+      inputs.set(c.name, input);
+      return el("label", { className: "field" }, el("span", {}, `${c.name} `, el("small", {}, c.type)), input);
+    });
+    const message = el("p", { className: "hint" });
+    const cancel = el("button", { type: "button" }, "Cancel");
+    cancel.addEventListener("click", () => void render());
+    const form = el("form", { className: "row-form" }, ...fields,
+      el("button", { type: "submit" }, row ? "Save" : "Insert"), cancel, message);
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const values: Record<string, Json> = {};
+      try {
+        for (const c of page.columns) {
+          const input = inputs.get(c.name)!;
+          if (c.read_only) continue;
+          if (row === null) {
+            if (input.value !== "") values[c.name] = parseInput(c, input.value);
+          } else if (input.value !== text(row[c.name])) {
+            // A cleared field means NULL; untouched fields are not sent.
+            values[c.name] = input.value === "" ? null : parseInput(c, input.value);
+          }
+        }
+      } catch (err) {
+        message.textContent = `Not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
+        return;
+      }
+      if (row !== null && Object.keys(values).length === 0) return void render();
+      const key = row === null ? undefined : Object.fromEntries(page.key.map((k) => [k, row[k] ?? null]));
+      write(row === null ? "insert" : "update", { key, values })
+        .then(() => render())
+        .catch((err: unknown) => fail(err, message));
+    });
+    return form;
+  }
+
+  async function render(): Promise<void> {
+    box.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+    try {
+      const page = await api<RowsPage>(`/api/tables/${encodeURIComponent(name)}/rows?offset=${offset}&limit=${PAGE}`);
+      const editable = page.key.length > 0;
+      const cols = page.columns.map((c) => c.name);
+      const head = el("tr", {}, ...cols.map((c) => el("th", {}, c)), editable ? el("th", {}) : "");
+      const body = page.rows.map((r) => {
+        const cells = cols.map((c) => el("td", {}, el("code", {}, text(r[c]))));
+        if (!editable) return el("tr", {}, ...cells);
+        const editBtn = el("button", { type: "button" }, "Edit");
+        const delBtn = el("button", { type: "button", className: "danger" }, "Delete");
+        editBtn.addEventListener("click", () => box.replaceChildren(el("h3", {}, "Edit row"), rowForm(page, r)));
+        delBtn.addEventListener("click", () => {
+          if (!confirm("Delete this row? This cannot be undone.")) return;
+          const key = Object.fromEntries(page.key.map((k) => [k, r[k] ?? null]));
+          write("delete", { key }).then(() => render()).catch((err: unknown) => fail(err, box));
+        });
+        return el("tr", {}, ...cells, el("td", { className: "actions" }, editBtn, delBtn));
+      });
+      const prev = el("button", { type: "button", disabled: offset === 0 }, "← Previous");
+      const next = el("button", { type: "button", disabled: page.rows.length < PAGE }, "Next →");
+      prev.addEventListener("click", () => { offset = Math.max(0, offset - PAGE); void render(); });
+      next.addEventListener("click", () => { offset += PAGE; void render(); });
+      const add = el("button", { type: "button", disabled: !editable }, "Add row");
+      add.addEventListener("click", () => box.replaceChildren(el("h3", {}, "New row"), rowForm(page, null)));
+      box.replaceChildren(
+        el("div", { className: "toolbar" }, add, prev, next,
+          el("span", { className: "hint" }, page.rows.length ? `Rows ${offset + 1}–${offset + page.rows.length}` : "")),
+        editable ? "" : el("p", { className: "hint" }, "No primary key: rows are read-only here."),
+        page.rows.length
+          ? el("div", { className: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)))
+          : el("p", { className: "hint" }, "No rows."));
+    } catch (err) {
+      fail(err, box);
+    }
+  }
+
+  void render();
+  return box;
+}
 
 const views: Record<string, () => Promise<Node[]>> = {
   async tables() {
@@ -63,6 +165,19 @@ const views: Record<string, () => Promise<Node[]>> = {
         ? table(t.policies.map((p) => ({ ...p, roles: p.roles.join(", ") })), ["name", "command", "roles", "using", "check"])
         : el("p", { className: "hint" }, t.rls ? "No policies: nobody can read it through the API." : ""),
     ]);
+  },
+
+  async data() {
+    const tables = await api<TableInfo[]>("/api/tables");
+    if (tables.length === 0) return [el("p", { className: "hint" }, "No tables in public yet.")];
+    const select = el("select", { id: "data-table" }, ...tables.map((t) => el("option", { value: t.name }, t.name)));
+    const holder = el("div", {}, dataEditor(tables[0]!.name));
+    select.addEventListener("change", () => holder.replaceChildren(dataEditor(select.value)));
+    return [
+      el("p", { className: "hint" }, "Edits run as service_role, so row level security does not apply. Values are cast by Postgres; JSON and array columns take JSON."),
+      el("form", {}, el("label", { htmlFor: "data-table" }, "Table"), select),
+      holder,
+    ];
   },
 
   async viewas() {

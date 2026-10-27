@@ -115,3 +115,48 @@ def test_view_as_matches_the_rest_api(client, keys):
         f"{STUDIO}/api/view-as", headers=admin(keys), json={"table": "e2e_studio; drop table x"}
     )
     assert r.status_code == 404
+
+
+def edit(keys, action, **body):
+    return httpx.post(
+        f"{STUDIO}/api/tables/e2e_studio/rows?action={action}", headers=admin(keys), json=body
+    )
+
+
+def test_table_editor_round_trip(keys):
+    r = edit(keys, "insert", values={"id": 100})
+    assert r.status_code == 200, r.text
+    # Defaults apply to the columns left out.
+    assert r.json()["row"] == {"id": 100, "owner": None, "verified_only": False}
+
+    r = edit(keys, "update", key={"id": 100}, values={"verified_only": True})
+    assert r.json()["row"]["verified_only"] is True
+
+    page = httpx.get(f"{STUDIO}/api/tables/e2e_studio/rows?limit=200", headers=admin(keys)).json()
+    assert page["key"] == ["id"]
+    assert {"id": 100, "owner": None, "verified_only": True} in page["rows"]
+
+    assert edit(keys, "insert", values={"id": 100}).json()["code"] == "database_error"
+    assert edit(keys, "delete", key={"id": 100}).status_code == 200
+    assert edit(keys, "delete", key={"id": 100}).status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("action", "body"),
+    [
+        ("insert", {"values": {"id": 101, "nope": 1}}),
+        ("insert", {"values": {'id" = 1; drop table x; --': 1}}),
+        ("update", {"key": {"owner": None}, "values": {"id": 1}}),
+        ("delete", {"key": {}}),
+        ("truncate", {}),
+    ],
+)
+def test_table_editor_rejects_unknown_columns_and_keys(keys, action, body):
+    r = edit(keys, action, **body)
+    assert r.status_code == 400 and r.json()["code"] == "invalid_request", r.text
+
+
+def test_table_editor_needs_the_key_and_a_real_table(keys):
+    assert httpx.get(f"{STUDIO}/api/tables/e2e_studio/rows").status_code == 401
+    r = httpx.get(f"{STUDIO}/api/tables/e2e_studio; drop table x/rows", headers=admin(keys))
+    assert r.status_code == 404

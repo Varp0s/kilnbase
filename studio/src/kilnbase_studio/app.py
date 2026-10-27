@@ -13,6 +13,7 @@ from kilnbase_auth.tokens import ACCESS_TOKEN_LIFETIME, user_claims
 from pydantic import BaseModel, Field
 
 from .config import Config
+from .rows import COLUMNS_SQL, BadRequest, Table
 
 WEB = Path(__file__).parent / "web"
 NO_SESSION = "00000000-0000-0000-0000-000000000000"
@@ -72,6 +73,12 @@ class ViewAs(BaseModel):
     # None means anon (the anon key without a user token).
     user_id: UUID | None = None
     limit: int = Field(default=50, ge=1, le=100)
+
+
+class RowWrite(BaseModel):
+    # The primary key of the row to change or delete; absent for an insert.
+    key: dict | None = None
+    values: dict | None = None
 
 
 def error(status: int, code: str, message: str) -> JSONResponse:
@@ -171,6 +178,59 @@ def create_app(config: Config) -> FastAPI:
                 await tx.rollback()
         rows = [json.loads(r["row"]) for r in rows]
         return {"role": role, "claims": claims, "denied": False, "rows": rows}
+
+    async def load_table(conn, name: str) -> Table | None:
+        columns = [dict(r) for r in await conn.fetch(COLUMNS_SQL, name)]
+        return Table(name, columns) if columns else None
+
+    async def as_service_role(conn) -> None:
+        # Studio connects as postgres; edits go through the role the API's server keys use.
+        await conn.execute("set local role service_role")
+        await conn.execute("set local statement_timeout = '5s'")
+
+    @app.get("/api/tables/{name}/rows", dependencies=[Depends(admin)])
+    async def rows(name: str, offset: int = 0, limit: int = 50):
+        if not (0 <= offset and 1 <= limit <= 200):
+            return error(400, "invalid_request", "offset >= 0 and 1 <= limit <= 200")
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            table = await load_table(conn, name)
+            if table is None:
+                return error(404, "not_found", "no such table in public")
+            await as_service_role(conn)
+            fetched = await conn.fetch(table.select(), limit, offset)
+        return {
+            "columns": list(table.columns.values()),
+            "key": table.key,
+            "rows": [json.loads(r["row"]) for r in fetched],
+        }
+
+    @app.post("/api/tables/{name}/rows", dependencies=[Depends(admin)])
+    async def write_row(name: str, body: RowWrite, action: str = "insert"):
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            table = await load_table(conn, name)
+            if table is None:
+                return error(404, "not_found", "no such table in public")
+            try:
+                if action == "insert":
+                    sql, args = table.insert(body.values), [json.dumps(body.values)]
+                elif action == "update":
+                    sql = table.update(body.key, body.values)
+                    args = [json.dumps(body.values), json.dumps(body.key)]
+                elif action == "delete":
+                    sql, args = table.delete(body.key), [json.dumps(body.key)]
+                else:
+                    raise BadRequest("action is insert, update or delete")
+            except BadRequest as e:
+                return error(400, "invalid_request", str(e))
+            await as_service_role(conn)
+            try:
+                row = await conn.fetchval(sql, *args)
+            except asyncpg.PostgresError as e:
+                # The database's own message (constraint, type, permission) is what the admin needs.
+                return error(400, "database_error", str(e))
+        if row is None:
+            return error(404, "not_found", "no row has that primary key")
+        return {"row": json.loads(row)}
 
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
     return app

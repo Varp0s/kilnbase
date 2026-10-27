@@ -5,6 +5,13 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 
 ## [Unreleased]
 
+### Added
+- **Studio**: table editor (browse rows a page at a time; insert, edit and delete rows of tables with a primary
+  key, as service_role).
+
+### Fixed
+- **Studio**: the sign-in form no longer stays visible after signing in.
+
 ## [0.8.0] - 2026-10-27
 
 First tagged release.
