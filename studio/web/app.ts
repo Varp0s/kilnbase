@@ -54,6 +54,7 @@ interface User { id: string; email: string | null; created_at: string; is_anonym
 interface ViewAsResult { role: string; claims: Row; denied: boolean; rows: Row[] }
 interface Column { name: string; type: string; nullable: boolean; default: string | null; primary_key: boolean; read_only: boolean }
 interface RowsPage { columns: Column[]; key: string[]; rows: Row[] }
+interface SqlResult { columns: string[]; rows: Json[][]; truncated: boolean; status: string; committed: boolean }
 
 const PAGE = 50;
 
@@ -177,6 +178,40 @@ const views: Record<string, () => Promise<Node[]>> = {
       el("p", { className: "hint" }, "Edits run as service_role, so row level security does not apply. Values are cast by Postgres; JSON and array columns take JSON."),
       el("form", {}, el("label", { htmlFor: "data-table" }, "Table"), select),
       holder,
+    ];
+  },
+
+  async sql() {
+    const query = el("textarea", { id: "sql-query", rows: 10, spellcheck: false, placeholder: "select * from public.todos limit 10;" });
+    query.value = sessionStorage.getItem("kilnbase-studio-sql") ?? "";
+    const rollback = el("input", { type: "checkbox", id: "sql-rollback" });
+    const result = el("div");
+    const form = el("form", { className: "sql-form" },
+      query,
+      el("div", { className: "toolbar" },
+        el("button", { type: "submit" }, "Run"),
+        el("label", { htmlFor: "sql-rollback" }, rollback, " Roll back afterwards (try a change safely)"),
+        el("span", { className: "hint" }, "Ctrl+Enter runs")));
+    const run = () => {
+      sessionStorage.setItem("kilnbase-studio-sql", query.value);
+      result.replaceChildren(el("p", { className: "hint" }, "Running…"));
+      api<SqlResult>("/api/sql", { query: query.value, rollback: rollback.checked })
+        .then((r) => {
+          const rows = r.rows.map((values) => Object.fromEntries(r.columns.map((c, i) => [c, values[i] ?? null])));
+          result.replaceChildren(
+            el("p", { className: r.committed ? "ok" : "hint" },
+              `${r.status}${r.committed ? "" : " (rolled back)"}${r.truncated ? `, first ${r.rows.length} rows shown` : ""}`),
+            r.columns.length ? table(rows as Row[], r.columns) : "");
+        })
+        .catch((err: unknown) => fail(err, result));
+    };
+    form.addEventListener("submit", (e) => { e.preventDefault(); run(); });
+    query.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } });
+    return [
+      el("p", { className: "hint" },
+        "Runs as the database superuser in one transaction (15 s limit). Schema changes made here are not recorded in db/migrations; ",
+        "use `kilnbase migrate new` for changes you want to keep."),
+      form, result,
     ];
   },
 

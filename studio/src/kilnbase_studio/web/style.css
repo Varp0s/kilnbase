@@ -6,7 +6,7 @@ body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--fg); backgr
 header { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid var(--line); }
 h1 { font-size: 1.1rem; margin: 0; color: var(--accent); }
 nav { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-button, input, select { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.7rem; }
+button, input, select, textarea { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.7rem; }
 button { cursor: pointer; }
 button[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
 main { padding: 1rem; max-width: 1200px; }
@@ -31,3 +31,5 @@ button:disabled { opacity: 0.5; cursor: default; }
 .field small { color: var(--muted); }
 h3 { font-size: 0.95rem; margin: 1rem 0 0.5rem; }
 .row-form button { justify-self: start; }
+.sql-form { display: block; }
+.sql-form textarea { width: 100%; font: 13px/1.5 ui-monospace, monospace; resize: vertical; }

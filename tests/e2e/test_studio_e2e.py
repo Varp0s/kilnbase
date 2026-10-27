@@ -160,3 +160,33 @@ def test_table_editor_needs_the_key_and_a_real_table(keys):
     assert httpx.get(f"{STUDIO}/api/tables/e2e_studio/rows").status_code == 401
     r = httpx.get(f"{STUDIO}/api/tables/e2e_studio; drop table x/rows", headers=admin(keys))
     assert r.status_code == 404
+
+
+def sql(keys, query, rollback=False):
+    r = httpx.post(
+        f"{STUDIO}/api/sql", headers=admin(keys), json={"query": query, "rollback": rollback}
+    )
+    return r.status_code, r.json()
+
+
+def test_sql_editor_returns_rows_and_runs_scripts(keys):
+    status, body = sql(keys, "select 1 as a, 'x' as b, now() as c, '{1,2}'::int[] as d")
+    assert status == 200, body
+    assert body["columns"] == ["a", "b", "c", "d"] and body["rows"][0][:2] == [1, "x"]
+
+    status, body = sql(keys, "select g from generate_series(1, 1000) g")
+    assert len(body["rows"]) == 500 and body["truncated"]
+
+    status, body = sql(keys, "create table public.e2e_sql (id int); drop table public.e2e_sql;")
+    assert status == 200 and body["columns"] == [] and body["committed"], body
+
+
+def test_sql_editor_can_roll_back_and_reports_errors(keys):
+    status, body = sql(keys, "insert into public.e2e_studio (id) values (200)", rollback=True)
+    assert status == 200 and not body["committed"], body
+    _, body = sql(keys, "select count(*) from public.e2e_studio where id = 200")
+    assert body["rows"] == [[0]]
+
+    status, body = sql(keys, "select * from no_such_table")
+    assert status == 400 and "no_such_table" in body["message"]
+    assert httpx.post(f"{STUDIO}/api/sql", json={"query": "select 1"}).status_code == 401

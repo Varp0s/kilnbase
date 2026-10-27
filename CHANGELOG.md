@@ -8,6 +8,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 ### Added
 - **Studio**: table editor (browse rows a page at a time; insert, edit and delete rows of tables with a primary
   key, as service_role).
+- **Studio**: SQL editor (runs as the database superuser in one transaction, optionally rolled back; first
+  500 rows shown).
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

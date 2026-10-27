@@ -75,6 +75,24 @@ class ViewAs(BaseModel):
     limit: int = Field(default=50, ge=1, le=100)
 
 
+SQL_MAX_ROWS = 500
+SQL_MAX_CELL = 10_000
+
+
+class SqlRun(BaseModel):
+    query: str = Field(min_length=1, max_length=100_000)
+    # Run it, show the result, then roll back: a safe way to try a change.
+    rollback: bool = False
+
+
+def cell(value):
+    """JSON-safe, size-capped: timestamps, UUIDs, decimals and the like become their text."""
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    text = value if isinstance(value, str) else str(value)
+    return text if len(text) <= SQL_MAX_CELL else text[:SQL_MAX_CELL] + "…"
+
+
 class RowWrite(BaseModel):
     # The primary key of the row to change or delete; absent for an insert.
     key: dict | None = None
@@ -231,6 +249,47 @@ def create_app(config: Config) -> FastAPI:
         if row is None:
             return error(404, "not_found", "no row has that primary key")
         return {"row": json.loads(row)}
+
+    @app.post("/api/sql", dependencies=[Depends(admin)])
+    async def run_sql(body: SqlRun):
+        """Runs as the database superuser, in one transaction; DDL here bypasses db/migrations."""
+        async with app.state.pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                await conn.execute("set local statement_timeout = '15s'")
+                try:
+                    async with conn.transaction():  # a savepoint: a failed prepare is undone
+                        stmt = await conn.prepare(body.query)
+                except asyncpg.PostgresError as e:
+                    # Several statements cannot be prepared; run them as a script, without rows.
+                    if "multiple commands" not in str(e):
+                        raise
+                    status = await conn.execute(body.query)
+                    columns, rows, truncated = [], [], False
+                else:
+                    columns = [a.name for a in stmt.get_attributes()]
+                    records = await stmt.fetch() if not columns else []
+                    if columns:
+                        cursor = await stmt.cursor()
+                        records = await cursor.fetch(SQL_MAX_ROWS + 1)
+                    truncated = len(records) > SQL_MAX_ROWS
+                    rows = [[cell(v) for v in r] for r in records[:SQL_MAX_ROWS]]
+                    status = stmt.get_statusmsg() or f"{len(rows)} row(s)"
+            except asyncpg.PostgresError as e:
+                await tx.rollback()
+                return error(400, "database_error", str(e))
+            if body.rollback:
+                await tx.rollback()
+            else:
+                await tx.commit()
+        return {
+            "columns": columns,
+            "rows": rows,
+            "truncated": truncated,
+            "status": status,
+            "committed": not body.rollback,
+        }
 
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
     return app
