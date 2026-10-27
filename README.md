@@ -16,6 +16,19 @@ curl localhost:8000/health
 
 `kilnbase init` refuses to overwrite an existing `.env`, and every service refuses to start with missing or example secrets.
 
+### Studio (optional dashboard)
+
+```sh
+COMPOSE_PROFILES=studio docker compose up -d   # then open http://127.0.0.1:3001
+```
+
+Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio lists every `public` table with
+its RLS state and policies, your users and recent webhook deliveries, and **views a table as any user**: it runs
+the query with that user's role and the claims their access token carries, so you see exactly the rows the REST
+API would return to them, without signing in as them. Nothing is written; each query runs in a transaction
+that is rolled back. Studio listens on `127.0.0.1` only — use an SSH tunnel to reach it from another machine.
+A SQL editor, row editing and log viewing are not there yet.
+
 ### Security check
 
 ```sh
@@ -360,6 +373,7 @@ tokens travel there.
 | `core` | Rust | Gateway (API keys, JWT verification, rate limiting), storage, realtime |
 | `auth` | Python | Sign-up, sign-in, tokens; the only holder of the signing key |
 | `postgrest` | PostgREST | Auto-generated REST API, reachable only through `core` |
+| `studio` (optional) | Python + TS | Admin dashboard on 127.0.0.1:3001 |
 | `db` | PostgreSQL 18 | Data, row level security; ships pgvector, pg_cron and pgmq (`postgres/Dockerfile`) |
 
 API keys are ES256 JWTs. `KILNBASE_ANON_KEY` is safe for clients; `KILNBASE_SERVICE_ROLE_KEY` bypasses row level security and must never leave your servers.

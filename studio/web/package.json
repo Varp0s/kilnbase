@@ -1,0 +1,10 @@
+{
+  "name": "kilnbase-studio-web",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

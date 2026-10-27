@@ -7,11 +7,15 @@ log = logging.getLogger("kilnbase")
 
 
 class JsonFormatter(logging.Formatter):
+    def __init__(self, service: str = "auth"):
+        super().__init__()
+        self.service = service
+
     def format(self, record: logging.LogRecord) -> str:
         out = {
             "ts": round(record.created, 3),
             "level": record.levelname.lower(),
-            "service": "auth",
+            "service": self.service,
             "msg": record.getMessage(),
         }
         if record.name == "uvicorn.access" and isinstance(record.args, tuple):

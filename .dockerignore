@@ -5,4 +5,10 @@
 !auth/src/
 !cli/pyproject.toml
 !migrations/
+!studio/pyproject.toml
+!studio/src/
+!studio/web/app.ts
+!studio/web/package.json
+!studio/web/package-lock.json
+!studio/web/tsconfig.json
 **/__pycache__

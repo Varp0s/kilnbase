@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["auth", "cli"]
+members = ["auth", "cli", "studio"]
 
 [dependency-groups]
 dev = [
@@ -21,6 +21,6 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC"]
 "**/tests/**" = ["S101", "S105", "S106"]
 
 [tool.pytest.ini_options]
-testpaths = ["auth/tests", "cli/tests", "sdk/python/tests", "tests/e2e"]
+testpaths = ["auth/tests", "cli/tests", "studio/tests", "sdk/python/tests", "tests/e2e"]
 # The Python SDK is not a workspace member (its distribution name differs from the CLI's).
 pythonpath = ["sdk/python/src"]

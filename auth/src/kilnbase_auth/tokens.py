@@ -10,6 +10,31 @@ USER_ROLES = ("authenticated", "mfa_pending")
 REFRESH_TOKEN_LIFETIME = 30 * 24 * 3600
 
 
+def user_claims(
+    user_id: str,
+    email: str | None,
+    session_id: str,
+    aal: str,
+    mfa_pending: bool,
+    email_verified: bool = False,
+    recovery: bool = False,
+    is_anonymous: bool = False,
+) -> dict:
+    """A user's access-token claims minus iat/exp; Studio's "view as user" uses them too."""
+    return {
+        "iss": "kilnbase",
+        "sub": user_id,
+        "role": "mfa_pending" if mfa_pending else "authenticated",
+        "email": email,
+        "sid": session_id,
+        "aal": aal,
+        # RLS can require a confirmed address: (auth.jwt() ->> 'email_verified')::boolean
+        "email_verified": email_verified,
+        "amr": ["recovery"] if recovery else [],
+        "is_anonymous": is_anonymous,
+    }
+
+
 class Signer:
     """Issues and verifies access tokens; the only place the private key is used."""
 
@@ -18,33 +43,11 @@ class Signer:
         self._kid = private_jwk["kid"]
         self._public = self._jwk.key.public_key()
 
-    def access_token(
-        self,
-        user_id: str,
-        email: str | None,
-        session_id: str,
-        aal: str,
-        mfa_pending: bool,
-        email_verified: bool = False,
-        recovery: bool = False,
-        is_anonymous: bool = False,
-    ) -> tuple[str, int]:
+    def access_token(self, *args, **kwargs) -> tuple[str, int]:
+        """Arguments as for `user_claims`."""
         now = int(time.time())
         exp = now + ACCESS_TOKEN_LIFETIME
-        claims = {
-            "iss": "kilnbase",
-            "sub": user_id,
-            "role": "mfa_pending" if mfa_pending else "authenticated",
-            "email": email,
-            "sid": session_id,
-            "aal": aal,
-            # RLS can require a confirmed address: (auth.jwt() ->> 'email_verified')::boolean
-            "email_verified": email_verified,
-            "amr": ["recovery"] if recovery else [],
-            "is_anonymous": is_anonymous,
-            "iat": now,
-            "exp": exp,
-        }
+        claims = user_claims(*args, **kwargs) | {"iat": now, "exp": exp}
         token = jwt.encode(claims, self._jwk.key, algorithm="ES256", headers={"kid": self._kid})
         return token, exp
 

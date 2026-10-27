@@ -7,6 +7,7 @@ COPY auth ./auth
 COPY migrations ./migrations
 # uv needs every workspace member's manifest to validate the lock file.
 COPY cli/pyproject.toml ./cli/pyproject.toml
+COPY studio/pyproject.toml ./studio/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-auth \
     && useradd --system --uid 10001 kilnbase
 USER kilnbase

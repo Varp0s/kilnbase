@@ -1,0 +1,117 @@
+import uuid
+
+import httpx2 as httpx
+import pytest
+from conftest import psql, wait_for_schema
+
+STUDIO = "http://localhost:3001"
+PASSWORD = "correct horse battery staple"
+
+# A policy that depends on auth.uid() and on a claim, so mismatched claims would show.
+SCHEMA = """
+drop table if exists public.e2e_studio;
+create table public.e2e_studio (
+    id int primary key,
+    owner uuid default auth.uid(),
+    verified_only boolean not null default false
+);
+alter table public.e2e_studio enable row level security;
+create policy own_rows on public.e2e_studio for all to authenticated
+    using (owner = auth.uid()
+           and (not verified_only or coalesce((auth.jwt() ->> 'email_verified')::boolean, false)))
+    with check (owner = auth.uid());
+create policy public_rows on public.e2e_studio for select to anon using (owner is null);
+notify pgrst, 'reload schema';
+"""
+
+
+@pytest.fixture(scope="module", autouse=True)
+def schema(client, keys):
+    try:
+        httpx.get(STUDIO, timeout=2)
+    except httpx.HTTPError:
+        pytest.skip("start the stack with docker-compose.test.yml (studio profile) for these tests")
+    psql(SCHEMA)
+    wait_for_schema(client, keys, "e2e_studio")
+    yield
+    psql("drop table if exists public.e2e_studio;")
+
+
+def admin(keys) -> dict:
+    return {"Authorization": f"Bearer {keys.service_role}"}
+
+
+def view_as(keys, user_id: str | None) -> list[dict]:
+    body = {"table": "e2e_studio", "user_id": user_id, "limit": 100}
+    r = httpx.post(f"{STUDIO}/api/view-as", headers=admin(keys), json=body)
+    assert r.status_code == 200, r.text
+    assert not r.json()["denied"]
+    return sorted(r.json()["rows"], key=lambda row: row["id"])
+
+
+def rest(client, keys, token: str | None) -> list[dict]:
+    headers = {"apikey": keys.anon} | ({"Authorization": f"Bearer {token}"} if token else {})
+    r = client.get("/rest/v1/e2e_studio?order=id", headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def sign_up(client, keys) -> dict:
+    body = {"email": f"studio-{uuid.uuid4().hex[:10]}@example.com", "password": PASSWORD}
+    r = client.post("/auth/v1/signup", headers={"apikey": keys.anon}, json=body)
+    assert r.status_code in (200, 201), r.text
+    return r.json()
+
+
+def test_admin_api_needs_the_service_role_key(keys):
+    assert httpx.get(f"{STUDIO}/api/tables").status_code == 401
+    bad = {"Authorization": f"Bearer {keys.anon}"}
+    assert httpx.get(f"{STUDIO}/api/tables", headers=bad).status_code == 401
+    r = httpx.get(f"{STUDIO}/api/tables", headers=admin(keys))
+    assert r.status_code == 200
+    table = next(t for t in r.json() if t["name"] == "e2e_studio")
+    assert table["rls"] and {p["name"] for p in table["policies"]} == {"own_rows", "public_rows"}
+
+
+def test_pages_are_locked_down():
+    r = httpx.get(f"{STUDIO}/")
+    assert r.status_code == 200 and "<script" in r.text and "onclick" not in r.text
+    assert "default-src 'self'" in r.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_user_list_has_no_secrets(client, keys):
+    sign_up(client, keys)
+    users = httpx.get(f"{STUDIO}/api/users", headers=admin(keys)).json()
+    assert users and set(users[0]) == {"id", "email", "created_at", "is_anonymous"}
+
+
+def test_view_as_matches_the_rest_api(client, keys):
+    a, b = sign_up(client, keys), sign_up(client, keys)
+    for session, ids in ((a, (1, 2)), (b, (3,))):
+        headers = {"apikey": keys.anon, "Authorization": f"Bearer {session['access_token']}"}
+        for i in ids:
+            row = {"id": i, "verified_only": i == 2}
+            r = client.post("/rest/v1/e2e_studio", headers=headers, json=row)
+            assert r.status_code == 201, r.text
+    psql("insert into public.e2e_studio (id, owner) values (4, null);")
+
+    for session in (a, b):
+        mine = view_as(keys, session["user"]["id"])
+        assert mine == rest(client, keys, session["access_token"])
+        assert mine  # each user sees something, so equality is not trivially []
+    # Row 2 needs a verified email, which these users lack: the claim is honoured.
+    assert [r["id"] for r in view_as(keys, a["user"]["id"])] == [1]
+    assert (
+        view_as(keys, None)
+        == rest(client, keys, None)
+        == [{"id": 4, "owner": None, "verified_only": False}]
+    )
+
+    # Table names are looked up, never spliced into SQL.
+    r = httpx.post(
+        f"{STUDIO}/api/view-as", headers=admin(keys), json={"table": "e2e_studio; drop table x"}
+    )
+    assert r.status_code == 404

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kilnbase Studio</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Kilnbase Studio</h1>
+    <nav id="nav" hidden>
+      <button type="button" data-view="tables">Tables &amp; policies</button>
+      <button type="button" data-view="viewas">View as user</button>
+      <button type="button" data-view="users">Users</button>
+      <button type="button" data-view="webhooks">Webhook deliveries</button>
+      <button type="button" id="signout">Sign out</button>
+    </nav>
+  </header>
+  <main>
+    <form id="login">
+      <label for="key">service_role key</label>
+      <input id="key" type="password" autocomplete="off" required>
+      <button type="submit">Open</button>
+      <p class="hint">Kept in this tab only (sessionStorage). Studio listens on 127.0.0.1.</p>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+    <section id="view" aria-live="polite"></section>
+  </main>
+</body>
+</html>

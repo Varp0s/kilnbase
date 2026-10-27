@@ -98,6 +98,28 @@ services:
       - auth
       - postgrest
 
+  # Optional admin dashboard: COMPOSE_PROFILES=studio. Published on 127.0.0.1 only; reach it from
+  # elsewhere through an SSH tunnel, never through core or a public port.
+  studio:
+    profiles: [studio]
+    build:
+      context: .
+      dockerfile: studio/Dockerfile
+    image: ghcr.io/varp0s/kilnbase-studio:dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      KILNBASE_SERVICE_ROLE_KEY: ${KILNBASE_SERVICE_ROLE_KEY:?run `kilnbase init` first}
+      KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
+    ports:
+      - "127.0.0.1:3001:3001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
+
   # Optional; core authorizes every request and imgproxy only reads stored objects. It sits on an
   # internal network that only core joins, which is why its URLs are unsigned.
   imgproxy:
