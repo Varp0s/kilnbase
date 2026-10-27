@@ -1,0 +1,12 @@
+{
+  "name": "kilnbase-graphql",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "jose": "6.2.13",
+    "postgraphile": "5.1.5"
+  }
+}

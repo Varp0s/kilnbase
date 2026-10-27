@@ -85,6 +85,8 @@ services:
       KILNBASE_IMGPROXY_URL: ${KILNBASE_IMGPROXY_URL:-}
       # Functions: set to http://functions:9000 and start with COMPOSE_PROFILES=functions.
       KILNBASE_FUNCTIONS_URL: ${KILNBASE_FUNCTIONS_URL:-}
+      # GraphQL: set to http://graphql:4000 and start with COMPOSE_PROFILES=graphql.
+      KILNBASE_GRAPHQL_URL: ${KILNBASE_GRAPHQL_URL:-}
       # S3-compatible API: this key pair acts as service_role (servers only). Users can always sign
       # with their access token as the session token.
       KILNBASE_S3_ACCESS_KEY_ID: ${KILNBASE_S3_ACCESS_KEY_ID:-}
@@ -101,6 +103,23 @@ services:
     depends_on:
       - auth
       - postgrest
+
+  # Optional GraphQL API (PostGraphile) over the same tables as /rest/v1, reached through core at
+  # /graphql/v1. Like PostgREST it logs in as authenticator and runs each request as the caller.
+  graphql:
+    profiles: [graphql]
+    build: ./graphql
+    image: ghcr.io/varp0s/kilnbase-graphql:dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://authenticator:${KILNBASE_AUTHENTICATOR_PASSWORD}@db:5432/postgres
+      KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      db:
+        condition: service_healthy
 
   # Optional: runs ./functions/<name>/main.py for /functions/v1/<name>, each call in its own nsjail.
   # Untrusted code lives here, so the container holds only public keys and sits on a network that

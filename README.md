@@ -52,6 +52,19 @@ The container runs under Docker's default seccomp profile plus the namespace sys
 again for the function. On Linux hosts that restrict user namespaces through AppArmor (recent Ubuntu), the service
 refuses to start and says so.
 
+### GraphQL (optional)
+
+```sh
+echo KILNBASE_GRAPHQL_URL=http://graphql:4000 >> .env
+COMPOSE_PROFILES=graphql docker compose up -d
+curl localhost:8000/graphql/v1 -H "apikey: $KILNBASE_ANON_KEY" -H "Content-Type: application/json"   -d '{"query": "{ allTodos { nodes { title } } }"}'
+```
+
+[PostGraphile](https://postgraphile.org) serves the same tables as `/rest/v1`: tables without row level security
+stay hidden, and every request runs as the caller (anon, or the user in `Authorization`) with the same
+policies. The schema is read when the service starts, so run `docker compose restart graphql` after
+`kilnbase migrate`.
+
 ### Studio (optional dashboard)
 
 ```sh

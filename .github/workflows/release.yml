@@ -32,6 +32,9 @@ jobs:
           - name: kilnbase-functions
             context: .
             dockerfile: functions-runner/Dockerfile
+          - name: kilnbase-graphql
+            context: graphql
+            dockerfile: graphql/Dockerfile
     steps:
       - uses: actions/checkout@v7.0.1
       - run: scripts/release-gate.sh

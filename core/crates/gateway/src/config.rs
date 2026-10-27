@@ -17,6 +17,8 @@ pub struct Config {
     pub imgproxy_url: Option<String>,
     /// The optional functions runner; `None` answers 404 on `/functions/v1`.
     pub functions_url: Option<String>,
+    /// The optional GraphQL service; `None` answers 404 on `/graphql/v1`.
+    pub graphql_url: Option<String>,
     pub s3_region: String,
     pub s3_keys: Option<(String, String)>,
     /// `None` means any origin.
@@ -83,6 +85,9 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     let functions_url = get("KILNBASE_FUNCTIONS_URL")
         .map(|u| u.trim().trim_end_matches('/').to_owned())
         .filter(|u| !u.is_empty());
+    let graphql_url = get("KILNBASE_GRAPHQL_URL")
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty());
     let s3_region = get("KILNBASE_S3_REGION").unwrap_or_else(|| "us-east-1".into());
     // Optional: without a key pair the S3 API still serves users signing with their access token.
     let s3_keys = match (
@@ -114,6 +119,7 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         storage_signing_key,
         imgproxy_url,
         functions_url,
+        graphql_url,
         s3_region,
         s3_keys,
         cors_origins,

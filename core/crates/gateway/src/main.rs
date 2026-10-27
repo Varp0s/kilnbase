@@ -30,6 +30,7 @@ struct AppState {
     postgrest_url: String,
     auth_url: String,
     functions_url: Option<String>,
+    graphql_url: Option<String>,
     http: proxy::HttpClient,
     storage: storage::Storage,
     realtime: realtime::Hub,
@@ -82,6 +83,7 @@ async fn main() -> ExitCode {
         postgrest_url: cfg.postgrest_url,
         auth_url: cfg.auth_url,
         functions_url: cfg.functions_url,
+        graphql_url: cfg.graphql_url,
         http: proxy::client(),
         storage,
         realtime: hub,
@@ -101,6 +103,7 @@ async fn main() -> ExitCode {
         .route("/rest/v1/{*path}", any(rest))
         .route("/auth/v1/{*path}", any(auth_service))
         .route("/functions/v1/{name}", any(function))
+        .route("/graphql/v1", any(graphql))
         .route("/realtime/v1/websocket", get(realtime::websocket))
         .route("/storage/v1/bucket", post(storage::create_bucket))
         .route(
@@ -246,6 +249,22 @@ async fn function(
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     proxy::forward(&st.http, upstream, &format!("/{name}{query}"), req).await
+}
+
+/// Checked here like every API call; the GraphQL service verifies the token again itself.
+async fn graphql(State(st): State<Arc<AppState>>, req: Request) -> Response {
+    let Some(upstream) = &st.graphql_url else {
+        return error::ApiError::new(StatusCode::NOT_FOUND, "not_found", "GraphQL is not enabled")
+            .into_response();
+    };
+    if let Err(e) = auth::authorize(&st.keys, req.headers()) {
+        return e.into_response();
+    }
+    let path = req
+        .uri()
+        .query()
+        .map_or("/".to_owned(), |q| format!("/?{q}"));
+    proxy::forward(&st.http, upstream, &path, req).await
 }
 
 fn valid_function_name(name: &str) -> bool {

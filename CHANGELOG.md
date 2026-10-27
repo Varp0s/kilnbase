@@ -16,6 +16,8 @@ First release candidate (planned as 0.1.0).
   detection that revokes the whole session, argon2id hashing, per-email and per-IP rate limits.
 - **CLI**: `kilnbase init` also generates the S3 key pair, `kilnbase doctor` checks it (both or neither, length,
   reuse of another secret) and `kilnbase rotate-keys --s3` replaces it.
+- **GraphQL** (optional, `graphql` profile): PostGraphile at `/graphql/v1` over the tables `/rest/v1` serves,
+  with tokens verified by the service itself and every request run as the caller under row level security.
 - **Point-in-time recovery** (`kilnbase pitr enable|backup|list|restore`) with pgBackRest in the `db` image;
   restores are validated before anything stops and print an undo command. `kilnbase restore` and `pitr restore`
   keep realtime and webhook event ids increasing so clients' deduplication never drops new events.

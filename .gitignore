@@ -13,3 +13,4 @@ kilnbase-rollback.json
 studio/src/kilnbase_studio/web/app.js
 studio/web/node_modules/
 functions/.secrets
+graphql/node_modules/
