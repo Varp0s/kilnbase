@@ -21,6 +21,17 @@ MIGRATIONS_SQL = """
 select coalesce(json_object_agg(version, checksum order by version), '{}')
   from kilnbase.schema_migrations;
 """
+# Ids that clients and webhook receivers dedupe on must keep growing across a restore, or new
+# events would reuse ids they have already seen and be dropped as duplicates.
+EVENT_SEQUENCES_SQL = """
+select json_object_agg(s, coalesce(pg_sequence_last_value(s::regclass), 0))
+  from unnest(array[pg_get_serial_sequence('kilnbase.realtime_events', 'id'),
+                    pg_get_serial_sequence('kilnbase.webhook_deliveries', 'id')]) s
+"""
+ADVANCE_SEQUENCES_SQL = """
+select coalesce(json_agg(setval(key, value::bigint)), '[]') from json_each_text(:'seen'::json)
+ where value::bigint > coalesce(pg_sequence_last_value(key::regclass), 0)
+"""
 DUMP_IN_DB = "/tmp/kilnbase-backup.dump"  # noqa: S108 - inside the db container
 RESTORE_DB = "kilnbase_restore"
 
@@ -182,11 +193,13 @@ def restore(env_file: Path, path: Path, yes: bool) -> int:
                 print("restore: cancelled", file=sys.stderr)
                 return 1
             objects = stage(stack, tar, Path(tmp))
+            seen = query_db(root, EVENT_SEQUENCES_SQL)
             stopped = stack.services()
             if stopped:
                 docker("stop", *stopped)
             try:
                 replace_data(stack, objects)
+                query_db(root, ADVANCE_SEQUENCES_SQL, seen=json.dumps(seen))
             finally:
                 if stopped:
                     docker("start", *stopped)

@@ -9,6 +9,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run `kilnbase init` first}
     volumes:
       - db-data:/var/lib/postgresql
+      # Point-in-time recovery repository (`kilnbase pitr`).
+      - db-backups:/var/lib/pgbackrest
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
       interval: 5s
@@ -177,4 +179,5 @@ networks:
 volumes:
   functions-deps:
   db-data:
+  db-backups:
   storage-data:

@@ -40,8 +40,11 @@ def test_db_rows_map_to_levels():
         {"kind": "unprotected_table", "name": "public.t"},
         {"kind": "definer_function", "name": "public.f()"},
         {"kind": "public_bucket", "name": "avatars"},
+        {"kind": "archive_failing", "name": "000000010000000000000003"},
     ]
-    assert levels(check_db(rows)) == ["fail", "warn", "info"]
+    findings = check_db(rows)
+    assert levels(findings) == ["fail", "warn", "info", "warn"]
+    assert "000000010000000000000003" in findings[-1].message
 
 
 def s3_findings(**values):

@@ -1,4 +1,4 @@
-# Postgres with the extensions Kilnbase ships: pgvector, pg_cron and pgmq. None is enabled by default;
+# Postgres with pgBackRest and the extensions Kilnbase ships: pgvector, pg_cron and pgmq. None is enabled by default;
 # run `create extension` in a migration (`kilnbase migrate`) when a project needs one.
 FROM postgres:18.6-trixie AS pgmq
 # pgmq is plain SQL, so its files are copied as they are; nothing is compiled.
@@ -15,7 +15,10 @@ RUN mkdir /out \
 FROM postgres:18.6-trixie
 # Unpinned on purpose: the PGDG repository only keeps the newest build, and the base image pins Postgres.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends postgresql-18-pgvector postgresql-18-cron \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends postgresql-18-pgvector postgresql-18-cron pgbackrest \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /var/lib/pgbackrest && chown postgres:postgres /var/lib/pgbackrest
+# Point-in-time recovery, off until `kilnbase pitr enable` turns on WAL archiving.
+COPY pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
 COPY --from=pgmq /out/ /usr/share/postgresql/18/extension/
 CMD ["postgres", "-c", "shared_preload_libraries=pg_cron", "-c", "cron.database_name=postgres"]

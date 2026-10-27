@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import backup, doctor, gen_types, init, migrate, rotate_keys, upgrade
+from . import backup, doctor, gen_types, init, migrate, pitr, rotate_keys, upgrade
 
 
 def main() -> None:
@@ -60,6 +60,19 @@ def main() -> None:
     )
     upgrade_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
 
+    pitr_cmd = commands.add_parser("pitr", help="point-in-time recovery (pgBackRest)")
+    pitr_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+    pitr_actions = pitr_cmd.add_subparsers(dest="action", required=True)
+    pitr_actions.add_parser("enable", help="turn on WAL archiving and take a full backup")
+    pitr_actions.add_parser("backup", help="take a backup (run daily)")
+    pitr_actions.add_parser("list", help="show backups and the restorable window")
+    pitr_restore = pitr_actions.add_parser("restore", help="rewind the database to a time")
+    pitr_restore.add_argument("--to", help="ISO time with offset, e.g. 2026-10-27T12:00:00+00:00")
+    pitr_restore.add_argument(
+        "--timeline", type=int, help="as printed by an earlier restore (alone: undo that restore)"
+    )
+    pitr_restore.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+
     args = parser.parse_args()
     if args.command == "init":
         sys.exit(init.run(args.env_file, args.force))
@@ -77,6 +90,11 @@ def main() -> None:
         sys.exit(migrate.run(args.env_file, args.dir))
     if args.command == "upgrade":
         sys.exit(upgrade.run(args.env_file))
+    if args.command == "pitr":
+        if args.action == "restore":
+            sys.exit(pitr.restore(args.env_file, args.to, args.timeline, args.yes))
+        actions = {"enable": pitr.enable, "backup": pitr.backup, "list": pitr.list_backups}
+        sys.exit(actions[args.action](args.env_file))
     if args.command == "restore":
         sys.exit(backup.restore(args.env_file, args.file, args.yes))
 

@@ -116,6 +116,24 @@ database once the dump has restored cleanly into a scratch copy. The archive hol
 data, so treat it like a secret; it does not contain `.env`, which you must keep separately (without the same
 keys, restored sessions and API keys are invalid). Only the local storage volume is included.
 
+### Point-in-time recovery
+
+```sh
+uv run kilnbase pitr enable                         # once: WAL archiving + a full backup (restarts db)
+uv run kilnbase pitr backup                         # daily, e.g. from cron; incremental
+uv run kilnbase pitr list                           # backups and the restorable window
+uv run kilnbase pitr restore --to 2026-10-27T11:59:00+00:00   # asks first; --yes for scripts
+uv run kilnbase pitr restore --timeline 1 --yes     # undo: the command printed by the restore
+```
+
+Backed by pgBackRest in the `db` image, with the repository in the `db-backups` volume (two full backups kept).
+`restore` checks the time against the restorable window before stopping anything, makes sure the WAL up to now
+is archived, rewinds the database (not stored files), and prints the command that undoes it: every restore
+starts a new timeline, and restoring to the end of the previous one brings everything back. Ids that realtime
+clients and webhook receivers dedupe on keep increasing across a restore. Sessions and passwords come back as
+they were at that time, so after an incident also revoke sessions. The repository lives on the same disk:
+keep `kilnbase backup` files elsewhere too. `kilnbase doctor` warns when archiving starts failing.
+
 ### Upgrading
 
 ```sh

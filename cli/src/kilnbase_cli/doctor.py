@@ -123,6 +123,10 @@ from (
        and exists (select 1 from api_roles a where has_function_privilege(a.role, p.oid, 'EXECUTE'))
     union all
     select 'public_bucket', id from storage.buckets where public
+    union all
+    -- Failed WAL archiving keeps WAL on disk until it succeeds, and stops point-in-time recovery.
+    select 'archive_failing', coalesce(last_failed_wal, '?') from pg_stat_archiver
+     where last_failed_time > coalesce(last_archived_time, '-infinity')
 ) findings;
 """
 
@@ -143,6 +147,11 @@ DB_MESSAGES = {
         " is callable by API roles and bypasses RLS",
     ),
     "public_bucket": ("info", "storage bucket ", " is public: anyone can download its files"),
+    "archive_failing": (
+        "warn",
+        "WAL archiving is failing (last: ",
+        "); the disk fills up and point-in-time recovery stops; see `docker compose logs db`",
+    ),
 }
 
 
