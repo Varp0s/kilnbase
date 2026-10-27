@@ -12,6 +12,7 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   500 rows shown).
 - **Studio**: create users (with or without a password), confirm their email, end all their sessions and delete
   them; the user list shows sign-in and session details.
+- **Studio**: storage browser (create buckets; browse files by folder; upload, download and delete).
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

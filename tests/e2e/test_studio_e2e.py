@@ -232,3 +232,30 @@ def test_users_can_be_created_confirmed_signed_out_and_deleted(client, keys):
     assert act("delete").status_code == 200
     assert act("delete").status_code == 404
     assert act("promote").status_code == 400
+
+
+def test_storage_browser(keys):
+    bucket = f"studio-{uuid.uuid4().hex[:8]}"
+    h = admin(keys)
+    assert httpx.post(f"{STUDIO}/api/buckets", headers=h, json={"id": bucket}).status_code == 200
+    assert any(b["id"] == bucket for b in httpx.get(f"{STUDIO}/api/buckets", headers=h).json())
+
+    url = f"{STUDIO}/api/buckets/{bucket}/object"
+    for name in ("docs/a b.txt", "docs/sub/c.txt", "top.txt"):
+        r = httpx.post(
+            url, params={"name": name}, headers=h | {"Content-Type": "text/plain"}, content=b"hi"
+        )
+        assert r.status_code < 300, r.text
+
+    listing = httpx.get(f"{STUDIO}/api/buckets/{bucket}/objects", headers=h).json()
+    assert [(o["name"], o["folder"]) for o in listing] == [("docs/", True), ("top.txt", False)]
+    listing = httpx.get(
+        f"{STUDIO}/api/buckets/{bucket}/objects", params={"prefix": "docs/"}, headers=h
+    ).json()
+    assert [o["name"] for o in listing] == ["sub/", "a b.txt"]
+
+    r = httpx.get(url, params={"name": "docs/a b.txt"}, headers=h)
+    assert r.content == b"hi" and r.headers["content-type"] == "application/octet-stream"
+    assert httpx.post(f"{url}/delete", params={"name": "docs/a b.txt"}, headers=h).status_code < 300
+    assert httpx.get(url, params={"name": "docs/a b.txt"}, headers=h).status_code == 404
+    assert httpx.get(f"{STUDIO}/api/buckets").status_code == 401

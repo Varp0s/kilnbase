@@ -447,6 +447,7 @@ source = { editable = "studio" }
 dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "kilnbase-auth" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "uvicorn", extra = ["standard"] },
@@ -456,6 +457,7 @@ dependencies = [
 requires-dist = [
     { name = "asyncpg", specifier = "==0.32.0" },
     { name = "fastapi", specifier = "==0.162.0" },
+    { name = "httpx2", specifier = "==2.16.0" },
     { name = "kilnbase-auth", editable = "auth" },
     { name = "pyjwt", extras = ["crypto"], specifier = "==2.15.1" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.54.0" },

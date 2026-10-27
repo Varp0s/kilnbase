@@ -17,6 +17,8 @@ class Config:
     service_role_key: str
     anon_claims: dict
     port: int = 3001
+    # Stored files are read and written through core, which owns the storage backend.
+    core_url: str = "http://core:8000"
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -47,4 +49,5 @@ def load(env: Mapping[str, str]) -> Config:
         values["KILNBASE_SERVICE_ROLE_KEY"],
         claims["KILNBASE_ANON_KEY"],
         int(port),
+        env.get("KILNBASE_STUDIO_CORE_URL", "http://core:8000").rstrip("/"),
     )

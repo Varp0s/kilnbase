@@ -73,12 +73,20 @@ policies. The schema is read when the service starts, so run `docker compose res
 COMPOSE_PROFILES=studio docker compose up -d   # then open http://127.0.0.1:3001
 ```
 
-Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio lists every `public` table with
-its RLS state and policies, your users and recent webhook deliveries, and **views a table as any user**: it runs
-the query with that user's role and the claims their access token carries, so you see exactly the rows the REST
-API would return to them, without signing in as them. Nothing is written; each query runs in a transaction
-that is rolled back. Studio listens on `127.0.0.1` only — use an SSH tunnel to reach it from another machine.
-A SQL editor, row editing and log viewing are not there yet.
+Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio listens on `127.0.0.1` only;
+use an SSH tunnel to reach it from another machine.
+
+- **Tables & policies**: every `public` table with its RLS state and policies.
+- **Table editor**: browse rows; insert, edit and delete rows of tables with a primary key (as service_role).
+- **SQL**: run SQL as the database superuser in one transaction, optionally rolled back afterwards. Schema
+  changes made here are not recorded in `db/migrations`; use `kilnbase migrate new` for ones you keep.
+- **Storage**: create buckets, browse files by folder, upload, download and delete.
+- **View as user**: runs a query with that user's role and the claims their access token carries, so you see
+  exactly the rows the REST API returns to them, without signing in as them (rolled back, nothing is written).
+- **Users**: search, create, confirm email, end all sessions, delete.
+- **Webhook deliveries**: the newest deliveries with status and last error.
+
+Log viewing is not there yet.
 
 ### Security check
 

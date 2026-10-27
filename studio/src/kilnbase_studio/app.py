@@ -3,13 +3,15 @@ import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID
 
 import asyncpg
+import httpx2 as httpx
 from argon2 import PasswordHasher
 from fastapi import Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from kilnbase_auth.app import MIN_PASSWORD_LENGTH, normalize_email
 from kilnbase_auth.tokens import ACCESS_TOKEN_LIFETIME, user_claims
@@ -99,6 +101,33 @@ def cell(value):
     return text if len(text) <= SQL_MAX_CELL else text[:SQL_MAX_CELL] + "…"
 
 
+BUCKETS_SQL = """
+select b.id, b.public, b.file_size_limit, b.allowed_mime_types, b.created_at,
+       count(o.id) as objects, coalesce(sum(o.size), 0) as bytes
+  from storage.buckets b left join storage.objects o on o.bucket_id = b.id
+ group by b.id order by b.id
+"""
+# One level of a "folder": files directly under the prefix, and the next path segments as folders.
+OBJECTS_SQL = """
+with under as (
+    select substr(name, length($2) + 1) as rest, name, size, mime_type, updated_at
+      from storage.objects
+     where bucket_id = $1 and starts_with(name, $2)
+)
+select split_part(rest, '/', 1) || '/' as name, null::bigint as size, null as mime_type,
+       max(updated_at) as updated_at, true as folder
+  from under where strpos(rest, '/') > 0 group by 1
+union all
+select rest, size, mime_type, updated_at, false from under where strpos(rest, '/') = 0
+ order by folder desc, name limit 500
+"""
+
+
+class NewBucket(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}$")
+    public: bool = False
+
+
 class NewUser(BaseModel):
     email: str = Field(max_length=254)
     # None creates a user who signs in with a link, code or provider only.
@@ -126,9 +155,11 @@ def create_app(config: Config) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=4)
+        app.state.http = httpx.AsyncClient(base_url=config.core_url, timeout=60)
         try:
             yield
         finally:
+            await app.state.http.aclose()
             await app.state.pool.close()
 
     app = FastAPI(title="Kilnbase Studio", docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -199,6 +230,61 @@ def create_app(config: Config) -> FastAPI:
         if await app.state.pool.fetchval(sql, user_id) is None:
             return error(404, "not_found", "no such user")
         return {"ok": True}
+
+    @app.get("/api/buckets", dependencies=[Depends(admin)])
+    async def buckets() -> list[dict]:
+        return [dict(r) for r in await app.state.pool.fetch(BUCKETS_SQL)]
+
+    @app.post("/api/buckets", dependencies=[Depends(admin)])
+    async def create_bucket(body: NewBucket):
+        try:
+            await app.state.pool.execute(
+                "insert into storage.buckets (id, public) values ($1, $2)", body.id, body.public
+            )
+        except asyncpg.PostgresError as e:
+            return error(400, "database_error", str(e))
+        return {"id": body.id}
+
+    @app.get("/api/buckets/{bucket}/objects", dependencies=[Depends(admin)])
+    async def objects(bucket: str, prefix: str = "") -> list[dict]:
+        return [dict(r) for r in await app.state.pool.fetch(OBJECTS_SQL, bucket, prefix)]
+
+    def object_path(bucket: str, name: str) -> str:
+        return f"/storage/v1/object/{quote(bucket, safe='')}/{quote(name, safe='/')}"
+
+    async def core(method: str, path: str, **kwargs) -> httpx.Response:
+        headers = kwargs.pop("headers", {}) | {
+            "apikey": config.service_role_key,
+            "Authorization": f"Bearer {config.service_role_key}",
+        }
+        return await app.state.http.request(method, path, headers=headers, **kwargs)
+
+    def relay(r: httpx.Response) -> Response:
+        """Core's answer as is, minus anything that would let a stored file act on this page."""
+        return Response(
+            r.content,
+            status_code=r.status_code,
+            media_type="application/octet-stream" if r.is_success else "application/json",
+        )
+
+    @app.get("/api/buckets/{bucket}/object", dependencies=[Depends(admin)])
+    async def download(bucket: str, name: str):
+        return relay(await core("GET", object_path(bucket, name)))
+
+    @app.post("/api/buckets/{bucket}/object", dependencies=[Depends(admin)])
+    async def upload(bucket: str, name: str, request: Request):
+        content_type = request.headers.get("content-type", "application/octet-stream")
+        r = await core(
+            "POST",
+            object_path(bucket, name),
+            content=request.stream(),
+            headers={"Content-Type": content_type},
+        )
+        return relay(r)
+
+    @app.post("/api/buckets/{bucket}/object/delete", dependencies=[Depends(admin)])
+    async def delete_object(bucket: str, name: str):
+        return relay(await core("DELETE", object_path(bucket, name)))
 
     @app.get("/api/webhook-deliveries", dependencies=[Depends(admin)])
     async def deliveries() -> list[dict]:

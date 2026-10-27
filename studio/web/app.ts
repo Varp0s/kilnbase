@@ -33,6 +33,28 @@ function table(rows: Row[], columns?: string[]): HTMLElement {
 
 class SignedOut extends Error {}
 
+/** Raw requests for file bodies; same key handling as api(). */
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  const res = await fetch(path, {
+    ...init,
+    headers: { Authorization: `Bearer ${sessionStorage.getItem(KEY) ?? ""}`, ...(init.headers ?? {}) },
+  });
+  if (res.status === 401) throw new SignedOut();
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(data.message ?? `HTTP ${res.status}`);
+  }
+  return res;
+}
+
+function size(bytes: number | null): string {
+  if (bytes === null) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${i ? n.toFixed(1) : n} ${units[i]}`;
+}
+
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method: body === undefined ? "GET" : "POST",
@@ -57,6 +79,8 @@ interface User {
 interface ViewAsResult { role: string; claims: Row; denied: boolean; rows: Row[] }
 interface Column { name: string; type: string; nullable: boolean; default: string | null; primary_key: boolean; read_only: boolean }
 interface RowsPage { columns: Column[]; key: string[]; rows: Row[] }
+interface Bucket { id: string; public: boolean; objects: number; bytes: number; created_at: string }
+interface StoredObject { name: string; size: number | null; mime_type: string | null; updated_at: string; folder: boolean }
 interface SqlResult { columns: string[]; rows: Json[][]; truncated: boolean; status: string; committed: boolean }
 
 const PAGE = 50;
@@ -215,6 +239,107 @@ const views: Record<string, () => Promise<Node[]>> = {
         "Runs as the database superuser in one transaction (15 s limit). Schema changes made here are not recorded in db/migrations; ",
         "use `kilnbase migrate new` for changes you want to keep."),
       form, result,
+    ];
+  },
+
+  async storage() {
+    const buckets = await api<Bucket[]>("/api/buckets");
+    const browser = el("div");
+
+    function open(bucket: string, prefix: string): void {
+      const q = (name: string) => `name=${encodeURIComponent(name)}`;
+      const base = `/api/buckets/${encodeURIComponent(bucket)}`;
+      browser.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+      api<StoredObject[]>(`${base}/objects?prefix=${encodeURIComponent(prefix)}`).then((items) => {
+        // Breadcrumbs: bucket / folder / folder
+        const parts = prefix.split("/").filter(Boolean);
+        const crumbs = [el("button", { type: "button", className: "link" }, bucket)];
+        crumbs[0]!.addEventListener("click", () => open(bucket, ""));
+        parts.forEach((p, i) => {
+          const b = el("button", { type: "button", className: "link" }, p);
+          b.addEventListener("click", () => open(bucket, parts.slice(0, i + 1).join("/") + "/"));
+          crumbs.push(el("span", {}, " / ") as unknown as HTMLButtonElement, b);
+        });
+
+        const file = el("input", { type: "file", id: "upload", multiple: true });
+        const message = el("span", { className: "hint" });
+        file.addEventListener("change", () => {
+          const files = [...(file.files ?? [])];
+          message.textContent = `Uploading ${files.length} file(s)…`;
+          Promise.all(files.map((f) => request(`${base}/object?${q(prefix + f.name)}`, {
+            method: "POST", body: f, headers: { "Content-Type": f.type || "application/octet-stream" },
+          }))).then(() => open(bucket, prefix)).catch((err: unknown) => fail(err, message));
+        });
+
+        const rows = items.map((o) => {
+          const name = el("td", {});
+          const actions = el("td", { className: "actions" });
+          if (o.folder) {
+            const b = el("button", { type: "button", className: "link" }, `📁 ${o.name}`);
+            b.addEventListener("click", () => open(bucket, prefix + o.name));
+            name.append(b);
+          } else {
+            name.append(o.name);
+            const dl = el("button", { type: "button" }, "Download");
+            dl.addEventListener("click", () => {
+              request(`${base}/object?${q(prefix + o.name)}`).then((r) => r.blob()).then((blob) => {
+                const a = el("a", { href: URL.createObjectURL(blob), download: o.name });
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+              }).catch((err: unknown) => fail(err, message));
+            });
+            const del = el("button", { type: "button", className: "danger" }, "Delete");
+            del.addEventListener("click", () => {
+              if (!confirm(`Delete ${prefix + o.name}? This cannot be undone.`)) return;
+              request(`${base}/object/delete?${q(prefix + o.name)}`, { method: "POST" })
+                .then(() => open(bucket, prefix)).catch((err: unknown) => fail(err, message));
+            });
+            actions.append(dl, del);
+          }
+          return el("tr", {}, name, el("td", {}, o.mime_type ?? ""), el("td", {}, size(o.size)),
+            el("td", { title: o.updated_at }, new Date(o.updated_at).toLocaleString()), actions);
+        });
+        browser.replaceChildren(
+          el("div", { className: "toolbar" }, el("strong", {}, ...crumbs),
+            el("label", { htmlFor: "upload", className: "button" }, "Upload files"), file, message),
+          rows.length
+            ? el("div", { className: "scroll" }, el("table", {},
+                el("thead", {}, el("tr", {}, ...["name", "type", "size", "updated", ""].map((h) => el("th", {}, h)))),
+                el("tbody", {}, ...rows)))
+            : el("p", { className: "hint" }, "Empty. Upload files to add them here."),
+          items.length === 500 ? el("p", { className: "hint" }, "Showing the first 500 entries.") : "");
+      }).catch((err: unknown) => fail(err, browser));
+    }
+
+    const list = el("div", { className: "buckets" }, ...buckets.map((b) => {
+      const button = el("button", { type: "button" },
+        el("strong", {}, b.id), el("br"),
+        el("small", {}, `${b.public ? "public" : "private"} · ${b.objects} file(s) · ${size(b.bytes)}`));
+      button.addEventListener("click", () => {
+        for (const other of list.querySelectorAll("button")) other.removeAttribute("aria-current");
+        button.setAttribute("aria-current", "page");
+        open(b.id, "");
+      });
+      return button;
+    }));
+
+    const id = el("input", { id: "bucket-id", required: true, pattern: "[a-z0-9][a-z0-9._\\-]{0,62}", placeholder: "avatars" });
+    const isPublic = el("input", { type: "checkbox", id: "bucket-public" });
+    const message = el("p", { className: "hint" });
+    const create = el("form", {},
+      el("label", { htmlFor: "bucket-id" }, "New bucket"), id,
+      el("label", { htmlFor: "bucket-public" }, isPublic, " Public (anyone with the URL can read files)"),
+      el("button", { type: "submit" }, "Create"), message);
+    create.addEventListener("submit", (e) => {
+      e.preventDefault();
+      api("/api/buckets", { id: id.value, public: isPublic.checked })
+        .then(() => show("storage")).catch((err: unknown) => fail(err, message));
+    });
+    return [
+      el("p", { className: "hint" }, "Files are read and written as service_role; storage policies apply to API users, not here."),
+      create,
+      buckets.length ? list : el("p", { className: "hint" }, "No buckets yet."),
+      browser,
     ];
   },
 
