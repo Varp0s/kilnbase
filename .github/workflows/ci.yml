@@ -68,6 +68,11 @@ jobs:
         run: |
           curl -fsS --retry 10 --retry-all-errors --retry-delay 2 localhost:8000/health
           docker compose exec -T auth python -c "import urllib.request; urllib.request.urlopen('http://localhost:9999/health')"
+      # Fails fast with the runner's own log; later suites recreate containers and lose it.
+      - name: a function runs in its sandbox
+        run: |
+          set -a; . ./.env; set +a
+          curl -fsS localhost:8000/functions/v1/whoami -H "apikey: $KILNBASE_ANON_KEY"             || { docker compose -f docker-compose.yml -f docker-compose.test.yml logs functions; exit 1; }
       # Before the e2e suite: test_gen_types_db type-checks generated output with the SDK's tsc.
       - uses: actions/setup-node@v7.1.0
         with:
