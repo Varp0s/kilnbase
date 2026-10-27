@@ -292,3 +292,25 @@ def test_webhooks_are_managed_without_leaking_secrets(keys):
         httpx.post(f"{STUDIO}/api/webhooks", headers=h, json=bad).json()["code"] == "database_error"
     )
     assert httpx.post(f"{STUDIO}/api/webhook-deliveries/0/retry", headers=h).status_code == 404
+
+
+def test_database_overview_and_extensions(keys):
+    h = admin(keys)
+    info = httpx.get(f"{STUDIO}/api/database", headers=h).json()
+    assert info["version"].startswith("18") and info["bytes"] > 0
+    names = {e["name"]: e for e in info["extensions"]}
+    assert "vector" in names and "plpgsql" in names
+
+    def act(name, action):
+        return httpx.post(f"{STUDIO}/api/extensions/{name}/{action}", headers=h)
+
+    was_installed = names["citext"]["installed_version"] is not None
+    assert act("citext", "enable").status_code == 200
+    ext = {
+        e["name"]: e for e in httpx.get(f"{STUDIO}/api/database", headers=h).json()["extensions"]
+    }
+    assert ext["citext"]["schema"] == "extensions"
+    if not was_installed:
+        assert act("citext", "disable").status_code == 200
+    assert act("no_such_ext", "enable").status_code == 404
+    assert act("citext", "upgrade").status_code == 400

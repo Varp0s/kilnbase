@@ -141,6 +141,24 @@ WEBHOOK_ACTIONS = {
 }
 
 
+DATABASE_SQL = """
+select current_setting('server_version') as version,
+       pg_database_size(current_database()) as bytes,
+       (select count(*) from pg_stat_activity where datname = current_database()) as connections,
+       current_setting('max_connections')::int as max_connections,
+       (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind in ('r', 'p')) as tables,
+       pg_postmaster_start_time() as started_at
+"""
+EXTENSIONS_SQL = """
+select a.name, a.default_version, a.installed_version, a.comment, n.nspname as schema
+  from pg_available_extensions a
+  left join pg_extension e on e.extname = a.name
+  left join pg_namespace n on n.oid = e.extnamespace
+ order by a.installed_version is null, a.name
+"""
+
+
 class NewWebhook(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     table: str = Field(min_length=1, max_length=130)
@@ -310,6 +328,37 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/buckets/{bucket}/object/delete", dependencies=[Depends(admin)])
     async def delete_object(bucket: str, name: str):
         return relay(await core("DELETE", object_path(bucket, name)))
+
+    @app.get("/api/database", dependencies=[Depends(admin)])
+    async def database():
+        async with app.state.pool.acquire() as conn:
+            info = dict(await conn.fetchrow(DATABASE_SQL))
+            info["extensions"] = [dict(r) for r in await conn.fetch(EXTENSIONS_SQL)]
+        return info
+
+    @app.post("/api/extensions/{name}/{action}", dependencies=[Depends(admin)])
+    async def extension(name: str, action: str):
+        """Relocatable extensions go to the extensions schema (README); others pick their own."""
+        async with app.state.pool.acquire() as conn:
+            relocatable = await conn.fetchval(
+                "select bool_or(relocatable) from pg_available_extension_versions where name = $1",
+                name,
+            )
+            if relocatable is None:
+                return error(404, "not_found", "no such extension in this image")
+            ident = await conn.fetchval("select quote_ident($1)", name)
+            if action == "enable":
+                schema = " with schema extensions" if relocatable else ""
+                sql = f"create extension if not exists {ident}{schema}"
+            elif action == "disable":
+                sql = f"drop extension if exists {ident}"
+            else:
+                return error(400, "invalid_request", "action is enable or disable")
+            try:
+                await conn.execute(sql)
+            except asyncpg.PostgresError as e:
+                return error(400, "database_error", str(e))
+        return {"ok": True}
 
     @app.get("/api/webhooks", dependencies=[Depends(admin)])
     async def webhooks() -> list[dict]:

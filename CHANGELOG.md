@@ -15,6 +15,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 - **Studio**: storage browser (create buckets; browse files by folder; upload, download and delete).
 - **Studio**: webhook management (create, enable, disable, delete; retry failed deliveries). Only the URL's host
   is shown, since chat webhooks carry their secret in the path.
+- **Studio**: database overview (version, size, connections) and extensions, enabled into the `extensions`
+  schema where they allow it.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

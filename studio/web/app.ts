@@ -86,6 +86,11 @@ interface Webhook {
   pending: number; failed: number; created_at: string;
 }
 interface Delivery { id: number; webhook: string; status: string; attempts: number; last_status: number | null; last_error: string | null; created_at: string }
+interface Extension { name: string; default_version: string; installed_version: string | null; comment: string | null; schema: string | null }
+interface DatabaseInfo {
+  version: string; bytes: number; connections: number; max_connections: number; tables: number;
+  started_at: string; extensions: Extension[];
+}
 interface SqlResult { columns: string[]; rows: Json[][]; truncated: boolean; status: string; committed: boolean }
 
 const PAGE = 50;
@@ -345,6 +350,47 @@ const views: Record<string, () => Promise<Node[]>> = {
       create,
       buckets.length ? list : el("p", { className: "hint" }, "No buckets yet."),
       browser,
+    ];
+  },
+
+  async database() {
+    const info = await api<DatabaseInfo>("/api/database");
+    const message = el("p", { className: "hint" });
+    const stat = (label: string, value: string) => el("div", { className: "stat" }, el("small", {}, label), el("strong", {}, value));
+    const search = el("input", { type: "search", id: "ext-search", placeholder: "filter extensions…" });
+    const body = el("tbody");
+    const render = () => body.replaceChildren(...info.extensions
+      .filter((x) => !search.value || `${x.name} ${x.comment ?? ""}`.toLowerCase().includes(search.value.toLowerCase()))
+      .map((x) => {
+        const on = x.installed_version !== null;
+        const button = el("button", { type: "button", className: on ? "danger" : "" }, on ? "Disable" : "Enable");
+        button.disabled = x.name === "plpgsql";
+        button.addEventListener("click", () => {
+          if (on && !confirm(`Drop extension ${x.name}? Objects that depend on it make this fail; nothing is dropped with it.`)) return;
+          api(`/api/extensions/${encodeURIComponent(x.name)}/${on ? "disable" : "enable"}`, {})
+            .then(() => show("database")).catch((err: unknown) => fail(err, message));
+        });
+        return el("tr", {},
+          el("td", {}, el("strong", {}, x.name)),
+          el("td", {}, on ? el("span", { className: "ok" }, `${x.installed_version} in ${x.schema}`) : el("span", { className: "hint" }, x.default_version)),
+          el("td", {}, x.comment ?? ""),
+          el("td", { className: "actions" }, button));
+      }));
+    search.addEventListener("input", render);
+    render();
+    return [
+      el("div", { className: "stats" },
+        stat("Postgres", info.version),
+        stat("Size", size(info.bytes)),
+        stat("Connections", `${info.connections} / ${info.max_connections}`),
+        stat("Tables in public", String(info.tables)),
+        stat("Up since", new Date(info.started_at).toLocaleString())),
+      el("h2", {}, "Extensions"),
+      el("p", { className: "hint" }, "Changes here are not recorded in db/migrations; add the same `create extension` to a migration to keep them."),
+      el("form", {}, el("label", { htmlFor: "ext-search" }, "Filter"), search),
+      message,
+      el("div", { className: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ...["name", "version", "description", ""].map((h) => el("th", {}, h)))), body)),
     ];
   },
 

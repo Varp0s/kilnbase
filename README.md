@@ -81,6 +81,7 @@ use an SSH tunnel to reach it from another machine.
 - **SQL**: run SQL as the database superuser in one transaction, optionally rolled back afterwards. Schema
   changes made here are not recorded in `db/migrations`; use `kilnbase migrate new` for ones you keep.
 - **Storage**: create buckets, browse files by folder, upload, download and delete.
+- **Database**: version, size, connections; enable and disable extensions (relocatable ones go to `extensions`).
 - **View as user**: runs a query with that user's role and the claims their access token carries, so you see
   exactly the rows the REST API returns to them, without signing in as them (rolled back, nothing is written).
 - **Users**: search, create, confirm email, end all sessions, delete.
