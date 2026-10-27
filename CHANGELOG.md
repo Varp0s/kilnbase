@@ -16,6 +16,8 @@ First release candidate (planned as 0.1.0).
   detection that revokes the whole session, argon2id hashing, per-email and per-IP rate limits.
 - **CLI**: `kilnbase init` also generates the S3 key pair, `kilnbase doctor` checks it (both or neither, length,
   reuse of another secret) and `kilnbase rotate-keys --s3` replaces it.
+- **CLI**: `kilnbase migrate` applies the project's SQL files from `db/migrations` (one transaction each,
+  checksummed, refuses edited or out-of-order history); `kilnbase migrate new <name>` creates one.
 - **CLI**: `kilnbase backup` / `kilnbase restore` archive the database and stored files into one file and
   restore it after checking that its migrations match the running version.
 - **CLI**: `kilnbase rotate-keys` switches to a new ES256 signing key without downtime (old keys stay in the

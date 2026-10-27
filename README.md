@@ -41,6 +41,19 @@ keys stay valid until `--retire`. `.env` is rewritten atomically and keeps its f
 `uv run kilnbase rotate-keys --s3` replaces only the S3 key pair (and adds one to an older `.env`). Core accepts a
 single pair, so there is no overlap: the old pair stops working on the next `docker compose up -d`.
 
+### Schema migrations
+
+```sh
+uv run kilnbase migrate new add_todos   # creates db/migrations/<UTC timestamp>_add_todos.sql
+uv run kilnbase migrate                 # applies pending files in order (--dir for another folder)
+```
+
+Each file runs in one transaction together with its history row, so a failing file leaves nothing behind
+and is retried next time; don't put `BEGIN`/`COMMIT` or `CREATE INDEX CONCURRENTLY` in it. The REST schema
+cache reloads afterwards. `migrate` refuses to continue when an applied file was edited or deleted, or when a
+new file sorts before one that is already applied. History lives in `kilnbase.app_migrations`, apart from the
+platform's own migrations.
+
 ### Backup and restore
 
 ```sh

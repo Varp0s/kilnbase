@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import backup, doctor, gen_types, init, rotate_keys
+from . import backup, doctor, gen_types, init, migrate, rotate_keys
 
 
 def main() -> None:
@@ -47,6 +47,14 @@ def main() -> None:
     restore_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
     restore_cmd.add_argument("--yes", action="store_true", help="do not ask for confirmation")
 
+    migrate_cmd = commands.add_parser("migrate", help="apply the project's SQL migrations")
+    migrate_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+    migrate_cmd.add_argument("--dir", type=Path, default=Path("db/migrations"))
+    migrate_new = migrate_cmd.add_subparsers(dest="action").add_parser(
+        "new", help="create an empty, timestamped migration file"
+    )
+    migrate_new.add_argument("name")
+
     args = parser.parse_args()
     if args.command == "init":
         sys.exit(init.run(args.env_file, args.force))
@@ -58,6 +66,10 @@ def main() -> None:
         sys.exit(rotate_keys.run(args.env_file, args.retire, args.s3))
     if args.command == "backup":
         sys.exit(backup.backup(args.env_file, args.output))
+    if args.command == "migrate" and args.action == "new":
+        sys.exit(migrate.new(args.dir, args.name))
+    if args.command == "migrate":
+        sys.exit(migrate.run(args.env_file, args.dir))
     if args.command == "restore":
         sys.exit(backup.restore(args.env_file, args.file, args.yes))
 
