@@ -40,3 +40,5 @@ button.link { border: 0; padding: 0; color: var(--accent); }
 label.button { border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.7rem; }
 input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
 label.button:focus-within { outline: 2px solid var(--accent); }
+.notice { border: 1px solid var(--accent); border-radius: 6px; padding: 0.5rem 0.75rem; margin-bottom: 1rem; }
+.notice p { margin: 0 0 0.25rem; }

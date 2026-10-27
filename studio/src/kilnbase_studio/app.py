@@ -123,6 +123,31 @@ select rest, size, mime_type, updated_at, false from under where strpos(rest, '/
 """
 
 
+# The URL's host only: chat webhooks carry their secret in the path. Never the signing secret.
+WEBHOOKS_SQL = """
+select w.id, w.name, w.table_name::text as table, w.events, w.enabled, w.max_attempts, w.created_at,
+       substring(w.url from '^https?://[^/?#]+') as host,
+       count(d.id) filter (where d.status = 'pending') as pending,
+       count(d.id) filter (where d.status = 'failed') as failed
+  from kilnbase.webhooks w left join kilnbase.webhook_deliveries d on d.webhook_id = w.id
+ group by w.id order by w.name
+"""
+WEBHOOK_ACTIONS = {
+    "enable": "update kilnbase.webhooks set enabled = true where name = $1 returning id",
+    "disable": "update kilnbase.webhooks set enabled = false where name = $1 returning id",
+    # drop_webhook also removes the table's trigger once no webhook uses it.
+    "delete": "select w.id from (select id from kilnbase.webhooks where name = $1) w,"
+    " lateral (select kilnbase.drop_webhook($1)) d",
+}
+
+
+class NewWebhook(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    table: str = Field(min_length=1, max_length=130)
+    events: list[str] = Field(min_length=1)
+    url: str = Field(pattern=r"^https?://", max_length=2048)
+
+
 class NewBucket(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}$")
     public: bool = False
@@ -285,6 +310,45 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/buckets/{bucket}/object/delete", dependencies=[Depends(admin)])
     async def delete_object(bucket: str, name: str):
         return relay(await core("DELETE", object_path(bucket, name)))
+
+    @app.get("/api/webhooks", dependencies=[Depends(admin)])
+    async def webhooks() -> list[dict]:
+        return [dict(r) for r in await app.state.pool.fetch(WEBHOOKS_SQL)]
+
+    @app.post("/api/webhooks", dependencies=[Depends(admin)])
+    async def create_webhook(body: NewWebhook):
+        try:
+            row = await app.state.pool.fetchrow(
+                "select name, secret from kilnbase.create_webhook($1, $2::regclass, $3, $4)",
+                body.name,
+                body.table,
+                body.events,
+                body.url,
+            )
+        except asyncpg.PostgresError as e:
+            return error(400, "database_error", str(e))
+        # The only time the signing secret is shown.
+        return dict(row)
+
+    @app.post("/api/webhooks/{name}/{action}", dependencies=[Depends(admin)])
+    async def webhook_action(name: str, action: str):
+        sql = WEBHOOK_ACTIONS.get(action)
+        if sql is None:
+            return error(400, "invalid_request", "action is enable, disable or delete")
+        if await app.state.pool.fetchval(sql, name) is None:
+            return error(404, "not_found", "no such webhook")
+        return {"ok": True}
+
+    @app.post("/api/webhook-deliveries/{delivery_id}/retry", dependencies=[Depends(admin)])
+    async def retry_delivery(delivery_id: int):
+        done = await app.state.pool.fetchval(
+            "update kilnbase.webhook_deliveries set status = 'pending', attempts = 0,"
+            " next_attempt_at = now() where id = $1 and status = 'failed' returning id",
+            delivery_id,
+        )
+        if done is None:
+            return error(404, "not_found", "no failed delivery with that id")
+        return {"ok": True}
 
     @app.get("/api/webhook-deliveries", dependencies=[Depends(admin)])
     async def deliveries() -> list[dict]:

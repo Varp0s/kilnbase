@@ -84,7 +84,8 @@ use an SSH tunnel to reach it from another machine.
 - **View as user**: runs a query with that user's role and the claims their access token carries, so you see
   exactly the rows the REST API returns to them, without signing in as them (rolled back, nothing is written).
 - **Users**: search, create, confirm email, end all sessions, delete.
-- **Webhook deliveries**: the newest deliveries with status and last error.
+- **Webhooks**: create (the signing secret is shown once), enable, disable and delete webhooks; the newest
+  deliveries with status and last error, and a retry for failed ones.
 
 Log viewing is not there yet.
 

@@ -81,6 +81,11 @@ interface Column { name: string; type: string; nullable: boolean; default: strin
 interface RowsPage { columns: Column[]; key: string[]; rows: Row[] }
 interface Bucket { id: string; public: boolean; objects: number; bytes: number; created_at: string }
 interface StoredObject { name: string; size: number | null; mime_type: string | null; updated_at: string; folder: boolean }
+interface Webhook {
+  name: string; table: string; events: string[]; enabled: boolean; host: string;
+  pending: number; failed: number; created_at: string;
+}
+interface Delivery { id: number; webhook: string; status: string; attempts: number; last_status: number | null; last_error: string | null; created_at: string }
 interface SqlResult { columns: string[]; rows: Json[][]; truncated: boolean; status: string; committed: boolean }
 
 const PAGE = 50;
@@ -427,8 +432,77 @@ const views: Record<string, () => Promise<Node[]>> = {
   },
 
   async webhooks() {
-    const rows = await api<Row[]>("/api/webhook-deliveries");
-    return [el("p", { className: "hint" }, "Newest 50 deliveries. Configure webhooks with kilnbase.create_webhook()."), table(rows)];
+    const [hooks, deliveries, tables] = await Promise.all([
+      api<Webhook[]>("/api/webhooks"), api<Delivery[]>("/api/webhook-deliveries"), api<TableInfo[]>("/api/tables"),
+    ]);
+    const message = el("p", { className: "hint" });
+    const act = (path: string, question?: string) => {
+      if (question && !confirm(question)) return;
+      api(path, {}).then(() => show("webhooks")).catch((err: unknown) => fail(err, message));
+    };
+
+    const hookRows = hooks.map((w) => {
+      const toggle = el("button", { type: "button" }, w.enabled ? "Disable" : "Enable");
+      toggle.addEventListener("click", () => act(`/api/webhooks/${encodeURIComponent(w.name)}/${w.enabled ? "disable" : "enable"}`));
+      const del = el("button", { type: "button", className: "danger" }, "Delete");
+      del.addEventListener("click", () => act(`/api/webhooks/${encodeURIComponent(w.name)}/delete`,
+        `Delete webhook ${w.name} and its delivery log?`));
+      return el("tr", {},
+        el("td", {}, w.name), el("td", {}, el("code", {}, w.table)), el("td", {}, w.events.join(", ")),
+        el("td", {}, el("code", {}, w.host)),
+        el("td", {}, w.enabled ? el("span", { className: "ok" }, "on") : el("span", { className: "hint" }, "off")),
+        el("td", {}, `${w.pending} pending`, w.failed ? el("span", { className: "error" }, ` · ${w.failed} failed`) : ""),
+        el("td", { className: "actions" }, toggle, del));
+    });
+
+    const deliveryRows = deliveries.map((d) => {
+      const actions = el("td", { className: "actions" });
+      if (d.status === "failed") {
+        const retry = el("button", { type: "button" }, "Retry");
+        retry.addEventListener("click", () => act(`/api/webhook-deliveries/${d.id}/retry`));
+        actions.append(retry);
+      }
+      return el("tr", {},
+        el("td", {}, String(d.id)), el("td", {}, d.webhook),
+        el("td", {}, el("span", { className: d.status === "failed" ? "error" : d.status === "delivered" ? "ok" : "hint" }, d.status)),
+        el("td", {}, String(d.attempts)), el("td", {}, d.last_status === null ? "" : String(d.last_status)),
+        el("td", {}, el("code", {}, d.last_error ?? "")),
+        el("td", { title: d.created_at }, new Date(d.created_at).toLocaleString()), actions);
+    });
+
+    const name = el("input", { id: "hook-name", required: true, placeholder: "new-orders" });
+    const target = el("select", { id: "hook-table" }, ...tables.map((t) => el("option", { value: `public.${t.name}` }, t.name)));
+    const url = el("input", { id: "hook-url", type: "url", required: true, placeholder: "https://example.com/hooks/orders" });
+    const events = ["INSERT", "UPDATE", "DELETE"].map((e) => el("input", { type: "checkbox", value: e, id: `hook-${e}`, checked: e === "INSERT" }));
+    const secret = el("div");
+    const create = el("form", {},
+      el("label", { htmlFor: "hook-name" }, "New webhook"), name,
+      el("label", { htmlFor: "hook-table" }, "on"), target,
+      ...events.map((e) => el("label", { htmlFor: e.id }, e, ` ${e.value}`)),
+      el("label", { htmlFor: "hook-url" }, "POST to"), url,
+      el("button", { type: "submit" }, "Create"));
+    create.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const chosen = events.filter((c) => c.checked).map((c) => c.value);
+      api<{ name: string; secret: string }>("/api/webhooks", { name: name.value, table: target.value, events: chosen, url: url.value })
+        .then((r) => {
+          void show("webhooks").then(() => view.prepend(el("div", { className: "notice" },
+            el("p", {}, `Webhook ${r.name} created. Its signing secret (X-Kilnbase-Signature) is shown only now:`),
+            el("pre", {}, r.secret))));
+        })
+        .catch((err: unknown) => fail(err, secret));
+    });
+
+    const grid = (head: string[], rows: HTMLElement[], empty: string) => rows.length
+      ? el("div", { className: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, ...head.map((h) => el("th", {}, h)))), el("tbody", {}, ...rows)))
+      : el("p", { className: "hint" }, empty);
+    return [
+      create, secret, message,
+      el("h2", {}, "Webhooks"),
+      grid(["name", "table", "events", "target", "", "queue", ""], hookRows, "No webhooks yet."),
+      el("h2", {}, "Newest deliveries"),
+      grid(["id", "webhook", "status", "attempts", "HTTP", "last error", "queued", ""], deliveryRows, "No deliveries yet."),
+    ];
   },
 };
 

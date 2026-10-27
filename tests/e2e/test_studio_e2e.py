@@ -259,3 +259,36 @@ def test_storage_browser(keys):
     assert httpx.post(f"{url}/delete", params={"name": "docs/a b.txt"}, headers=h).status_code < 300
     assert httpx.get(url, params={"name": "docs/a b.txt"}, headers=h).status_code == 404
     assert httpx.get(f"{STUDIO}/api/buckets").status_code == 401
+
+
+def test_webhooks_are_managed_without_leaking_secrets(keys):
+    h = admin(keys)
+    name = f"studio-{uuid.uuid4().hex[:8]}"
+    body = {
+        "name": name,
+        "table": "public.e2e_studio",
+        "events": ["INSERT"],
+        "url": "https://hooks.example.com/T000/secret-path",
+    }
+    r = httpx.post(f"{STUDIO}/api/webhooks", headers=h, json=body)
+    assert r.status_code == 200 and len(r.json()["secret"]) == 64, r.text
+
+    hook = next(
+        w for w in httpx.get(f"{STUDIO}/api/webhooks", headers=h).json() if w["name"] == name
+    )
+    assert (
+        hook["host"] == "https://hooks.example.com" and "secret" not in hook and "url" not in hook
+    )
+
+    def act(action):
+        return httpx.post(f"{STUDIO}/api/webhooks/{name}/{action}", headers=h)
+
+    assert act("disable").status_code == 200
+    assert act("enable").status_code == 200
+    assert act("delete").status_code == 200
+    assert act("delete").status_code == 404
+    bad = body | {"table": "public.no_such_table"}
+    assert (
+        httpx.post(f"{STUDIO}/api/webhooks", headers=h, json=bad).json()["code"] == "database_error"
+    )
+    assert httpx.post(f"{STUDIO}/api/webhook-deliveries/0/retry", headers=h).status_code == 404
