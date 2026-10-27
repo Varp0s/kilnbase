@@ -58,7 +58,8 @@ def test_errors_are_reported_without_details(client, keys):
 
 def test_jail_holds_no_secrets_and_a_read_only_root(client, keys):
     env = probe(client, keys, "env")
-    assert set(env) == {"KILNBASE_URL", "KILNBASE_ANON_KEY", "HOME", "LANG", "PATH"}
+    # SHARED is a `*.` entry from tests/functions/.secrets; nothing else leaks in.
+    assert set(env) == {"KILNBASE_URL", "KILNBASE_ANON_KEY", "HOME", "LANG", "PATH", "SHARED"}
     files = probe(client, keys, "files")
     assert files == {"root_writable": False, "functions": [], "cwd": ["main.py"]}
 
@@ -91,3 +92,15 @@ def test_packages_from_requirements_are_importable(client, keys):
     r = call(client, keys, "deps")
     assert r.status_code == 200, r.text
     assert r.json() == {"six": "1.17.0", "path": "/opt/six.py"}
+
+
+def test_secrets_reach_only_their_function(client, keys):
+    r = call(client, keys, "secret")
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "API_TOKEN": "abc=123",
+        "SHARED": "yes",
+        "ONLY_WHOAMI": None,
+        "PATH": "/usr/local/bin:/usr/bin:/bin",  # a secret cannot replace the jail's own variables
+        "files": [],  # functions/.secrets itself is not visible
+    }

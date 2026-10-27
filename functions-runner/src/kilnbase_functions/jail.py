@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,30 @@ LOG_LIMIT = 16 * 1024
 JAIL_TMP = "/tmp"  # noqa: S108 - a private tmpfs inside each jail
 MOUNT = "/mnt"  # exists in the read-only root; the function's directory is bound here
 DEPS_MOUNT = "/opt"  # likewise for the packages from functions/requirements.txt
+
+
+SECRET_LINE = re.compile(r"(\*|[a-z0-9_-]{1,63})\.([A-Z_][A-Z0-9_]*)=(.*)")
+
+
+def secrets(functions_dir: Path, name: str) -> dict[str, str]:
+    """
+    functions/.secrets lines `<function>.<KEY>=value` (or `*.<KEY>=value` for all functions).
+    Read on every call, so edits apply without a restart. The file is never visible inside a
+    jail (the functions directory is hidden there); each function gets only its own entries.
+    """
+    path = functions_dir / ".secrets"
+    if not path.is_file():
+        return {}
+    shared, own = {}, {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = SECRET_LINE.fullmatch(line.strip())
+        if match:
+            scope, key, value = match.groups()
+            if scope == "*":
+                shared[key] = value
+            elif scope == name:
+                own[key] = value
+    return shared | own
 
 
 @dataclass
@@ -30,9 +55,11 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
     read-only with other functions hidden; resource limits; the syscall filter in policy.kafel.
     The network namespace is shared so functions can reach the gateway and the internet, which
     is why the compose network gives this container no route to the database or internal services.
-    Nothing from this service's environment is passed in, only the variables listed here.
+    Nothing from this service's environment is passed in, only the variables listed here and the
+    function's own entries from functions/.secrets.
     """
-    env = {
+    # Secrets first, so they can never replace the variables below.
+    env = secrets(config.functions_dir, function_dir.name) | {
         "KILNBASE_URL": config.gateway_url,
         "KILNBASE_ANON_KEY": config.anon_key,
         "HOME": JAIL_TMP,

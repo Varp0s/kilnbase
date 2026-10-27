@@ -72,3 +72,14 @@ def test_handler_results_are_encoded():
     assert (out["status"], out["headers"]["x-id"]) == (201, "7")
     assert out["headers"]["content-type"].startswith("text/plain")
     assert encode(b"\x00")["headers"]["content-type"] == "application/octet-stream"
+
+
+def test_secrets_are_scoped_to_their_function(tmp_path):
+    from kilnbase_functions.jail import secrets
+
+    assert secrets(tmp_path, "a") == {}
+    (tmp_path / ".secrets").write_text(
+        "# comment\na.TOKEN=x=y\n*.SHARED=1\nb.TOKEN=other\n*.TOKEN=default\nbad line\nA.X=1\n"
+    )
+    assert secrets(tmp_path, "a") == {"TOKEN": "x=y", "SHARED": "1"}
+    assert secrets(tmp_path, "c") == {"TOKEN": "default", "SHARED": "1"}
