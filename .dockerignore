@@ -6,6 +6,8 @@
 !cli/pyproject.toml
 !migrations/
 !studio/pyproject.toml
+!functions-runner/pyproject.toml
+!functions-runner/src/
 !studio/src/
 !studio/web/app.ts
 !studio/web/package.json

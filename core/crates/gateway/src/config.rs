@@ -15,6 +15,8 @@ pub struct Config {
     pub storage_max_file_size: u64,
     pub storage_signing_key: String,
     pub imgproxy_url: Option<String>,
+    /// The optional functions runner; `None` answers 404 on `/functions/v1`.
+    pub functions_url: Option<String>,
     pub s3_region: String,
     pub s3_keys: Option<(String, String)>,
     /// `None` means any origin.
@@ -78,6 +80,9 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     let imgproxy_url = get("KILNBASE_IMGPROXY_URL")
         .map(|u| u.trim().trim_end_matches('/').to_owned())
         .filter(|u| !u.is_empty());
+    let functions_url = get("KILNBASE_FUNCTIONS_URL")
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty());
     let s3_region = get("KILNBASE_S3_REGION").unwrap_or_else(|| "us-east-1".into());
     // Optional: without a key pair the S3 API still serves users signing with their access token.
     let s3_keys = match (
@@ -108,6 +113,7 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         storage_max_file_size,
         storage_signing_key,
         imgproxy_url,
+        functions_url,
         s3_region,
         s3_keys,
         cors_origins,

@@ -87,10 +87,10 @@ jobs:
         run: >-
           scripts/release-gate.sh --images ghcr.io/varp0s/kilnbase-core:dev
           ghcr.io/varp0s/kilnbase-auth:dev ghcr.io/varp0s/kilnbase-studio:dev
-          ghcr.io/varp0s/kilnbase-postgres:dev
+          ghcr.io/varp0s/kilnbase-postgres:dev ghcr.io/varp0s/kilnbase-functions:dev
       - name: services refuse example secrets
         run: |
-          for img in kilnbase-core kilnbase-auth kilnbase-studio; do
+          for img in kilnbase-core kilnbase-auth kilnbase-studio kilnbase-functions; do
             if docker run --rm --env-file .env.example ghcr.io/varp0s/$img:dev; then
               echo "$img started with example secrets"; exit 1
             fi

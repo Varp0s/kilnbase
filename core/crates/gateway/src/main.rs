@@ -29,6 +29,7 @@ struct AppState {
     keys: HashMap<String, DecodingKey>,
     postgrest_url: String,
     auth_url: String,
+    functions_url: Option<String>,
     http: proxy::HttpClient,
     storage: storage::Storage,
     realtime: realtime::Hub,
@@ -80,6 +81,7 @@ async fn main() -> ExitCode {
         keys: cfg.keys,
         postgrest_url: cfg.postgrest_url,
         auth_url: cfg.auth_url,
+        functions_url: cfg.functions_url,
         http: proxy::client(),
         storage,
         realtime: hub,
@@ -98,6 +100,7 @@ async fn main() -> ExitCode {
         .route("/rest/v1/", any(rest))
         .route("/rest/v1/{*path}", any(rest))
         .route("/auth/v1/{*path}", any(auth_service))
+        .route("/functions/v1/{name}", any(function))
         .route("/realtime/v1/websocket", get(realtime::websocket))
         .route("/storage/v1/bucket", post(storage::create_bucket))
         .route(
@@ -201,6 +204,57 @@ async fn auth_service(
     proxy::forward(&st.http, &st.auth_url, &upstream_path, req).await
 }
 
+/// Largest request body passed to a function; the runner enforces the same limit on streams.
+const FUNCTION_BODY_LIMIT: u64 = 1024 * 1024;
+
+async fn function(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    req: Request,
+) -> Response {
+    let not_found = || {
+        error::ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such function").into_response()
+    };
+    let Some(upstream) = &st.functions_url else {
+        return not_found();
+    };
+    if !valid_function_name(&name) {
+        return not_found();
+    }
+    // Checked here so bad calls never reach the runner; the runner checks again, since code
+    // running inside it can call it directly.
+    if let Err(e) = auth::authorize(&st.keys, req.headers()) {
+        return e.into_response();
+    }
+    let too_large = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|n| n > FUNCTION_BODY_LIMIT);
+    if too_large {
+        return error::ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "request body is larger than 1 MiB",
+        )
+        .into_response();
+    }
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    proxy::forward(&st.http, upstream, &format!("/{name}{query}"), req).await
+}
+
+fn valid_function_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 fn cors_layer(origins: Option<&[String]>) -> tower_http::cors::CorsLayer {
     use axum::http::{HeaderName, Method};
     use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -258,4 +312,24 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn function_names_cannot_leave_their_directory() {
+        assert!(super::valid_function_name("hello-world_2"));
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "a/b",
+            "Hello",
+            "a.b",
+            "a%2fb",
+            &"x".repeat(64),
+        ] {
+            assert!(!super::valid_function_name(bad), "{bad}");
+        }
+    }
 }

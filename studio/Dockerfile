@@ -16,6 +16,7 @@ COPY studio ./studio
 COPY --from=web /out/app.js ./studio/src/kilnbase_studio/web/app.js
 # uv needs every workspace member's manifest to validate the lock file.
 COPY cli/pyproject.toml ./cli/pyproject.toml
+COPY functions-runner/pyproject.toml ./functions-runner/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-studio \
     && useradd --system --uid 10001 kilnbase
 USER kilnbase

@@ -29,6 +29,9 @@ jobs:
           - name: kilnbase-studio
             context: .
             dockerfile: studio/Dockerfile
+          - name: kilnbase-functions
+            context: .
+            dockerfile: functions-runner/Dockerfile
     steps:
       - uses: actions/checkout@v7.0.1
       - run: scripts/release-gate.sh

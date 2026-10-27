@@ -1,0 +1,11 @@
+ERRNO(38) { clone3 }
+ERRNO(1) {
+  clone { (clone_flags & 0x7e020000) != 0 },
+  unshare, setns, mount, umount, pivot_root, chroot,
+  ptrace, process_vm_readv, process_vm_writev,
+  bpf, perf_event_open, userfaultfd, io_uring_setup, io_uring_enter, io_uring_register,
+  keyctl, add_key, request_key,
+  init_module, finit_module, delete_module, kexec_load, kexec_file_load,
+  open_by_handle_at, name_to_handle_at, swapon, swapoff, reboot, acct, quotactl, syslog
+}
+DEFAULT ALLOW

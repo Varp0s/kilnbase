@@ -81,6 +81,8 @@ services:
       KILNBASE_CORS_ORIGINS: ${KILNBASE_CORS_ORIGINS:-*}
       # Image transformations: set to http://imgproxy:8080 and start with COMPOSE_PROFILES=images.
       KILNBASE_IMGPROXY_URL: ${KILNBASE_IMGPROXY_URL:-}
+      # Functions: set to http://functions:9000 and start with COMPOSE_PROFILES=functions.
+      KILNBASE_FUNCTIONS_URL: ${KILNBASE_FUNCTIONS_URL:-}
       # S3-compatible API: this key pair acts as service_role (servers only). Users can always sign
       # with their access token as the session token.
       KILNBASE_S3_ACCESS_KEY_ID: ${KILNBASE_S3_ACCESS_KEY_ID:-}
@@ -90,13 +92,40 @@ services:
       - storage-data:/data
     ports:
       - "8000:8000"
-    networks: [default, images]
+    networks: [default, images, functions]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     depends_on:
       - auth
       - postgrest
+
+  # Optional: runs ./functions/<name>/main.py for /functions/v1/<name>, each call in its own nsjail.
+  # Untrusted code lives here, so the container holds only public keys and sits on a network that
+  # reaches core and the internet but not the database or the other internal services.
+  functions:
+    profiles: [functions]
+    build:
+      context: .
+      dockerfile: functions-runner/Dockerfile
+    image: ghcr.io/varp0s/kilnbase-functions:dev
+    restart: unless-stopped
+    environment:
+      KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
+      KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
+    volumes:
+      - ./functions:/functions:ro
+    networks: [functions]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    # nsjail creates the per-call namespaces, which Docker's default seccomp profile forbids; the
+    # jail then applies its own filter (functions-runner/src/kilnbase_functions/policy.kafel).
+    # shortcut: unconfined instead of Docker's profile plus the namespace syscalls; write that
+    # custom profile before calling this hardened.
+    security_opt: ["no-new-privileges:true", "seccomp=unconfined"]
+    mem_limit: 1g
+    pids_limit: 512
 
   # Optional admin dashboard: COMPOSE_PROFILES=studio. Published on 127.0.0.1 only; reach it from
   # elsewhere through an SSH tunnel, never through core or a public port.
@@ -142,6 +171,8 @@ services:
 networks:
   images:
     internal: true
+  # Not internal: functions may call external APIs.
+  functions:
 
 volumes:
   db-data:

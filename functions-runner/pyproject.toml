@@ -1,0 +1,20 @@
+[project]
+name = "kilnbase-functions"
+version = "0.0.0"
+description = "Kilnbase Functions runner: runs Python functions in nsjail (optional service)"
+license = "Apache-2.0"
+requires-python = ">=3.15"
+dependencies = [
+    "fastapi==0.162.0",
+    "kilnbase-auth",
+    "pyjwt[crypto]==2.15.1",
+    "uvicorn[standard]==0.54.0",
+]
+
+[tool.uv.sources]
+# Only for the shared JSON log format; the runner holds no private key.
+kilnbase-auth = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"

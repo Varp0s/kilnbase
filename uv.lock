@@ -6,6 +6,7 @@ requires-python = ">=3.15"
 members = [
     "kilnbase",
     "kilnbase-auth",
+    "kilnbase-functions",
     "kilnbase-studio",
 ]
 
@@ -406,6 +407,25 @@ requires-dist = [
     { name = "httpx2", specifier = "==2.16.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = "==2.15.1" },
     { name = "pyotp", specifier = "==2.10.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = "==0.54.0" },
+]
+
+[[package]]
+name = "kilnbase-functions"
+version = "0.0.0"
+source = { editable = "functions-runner" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "kilnbase-auth" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = "==0.162.0" },
+    { name = "kilnbase-auth", editable = "auth" },
+    { name = "pyjwt", extras = ["crypto"], specifier = "==2.15.1" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.54.0" },
 ]
 

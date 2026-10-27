@@ -16,6 +16,36 @@ curl localhost:8000/health
 
 `kilnbase init` refuses to overwrite an existing `.env`, and every service refuses to start with missing or example secrets.
 
+### Functions (optional)
+
+```python
+# functions/hello/main.py
+def handler(request):
+    user = request["user"]  # verified claims: role, sub, ...
+    return {"message": f"Hello, {request['query'].get('name', 'world')}!", "role": user["role"]}
+```
+
+```sh
+echo KILNBASE_FUNCTIONS_URL=http://functions:9000 >> .env
+COMPOSE_PROFILES=functions docker compose up -d
+curl "localhost:8000/functions/v1/hello?name=Ada" -H "apikey: $KILNBASE_ANON_KEY"
+```
+
+`request` has `method`, `path`, `query`, `headers`, `body` (bytes) and `user` (the caller's verified token
+claims; anon without a user token). Return a body (dict/list → JSON, `str` → text, `bytes`), optionally as
+`(body, status)` or `(body, status, headers)`. Inside, `KILNBASE_URL` and `KILNBASE_ANON_KEY` let a function call
+the API; forward the caller's `Authorization` header to act as them.
+
+Every call runs in its own [nsjail](https://github.com/google/nsjail) sandbox: separate user, PID and mount
+namespaces, a read-only root without the other functions, a private `/tmp`, a syscall filter that blocks new
+namespaces, `ptrace`, `bpf`, `io_uring` and similar, and limits on time (10 s), memory (256 MB), processes and
+file sizes. The `functions` container holds no secrets beyond the public keys and the anon key, and its network
+reaches the gateway and the internet but not the database or internal services. Current limits: Python
+standard library only (no `requirements.txt` yet), no per-function secrets, request bodies up to 1 MiB.
+The container runs with Docker's seccomp profile disabled so that nsjail can create namespaces; the jail's own
+filter replaces it. On Linux hosts that restrict user namespaces through AppArmor (recent Ubuntu), the service
+refuses to start and says so.
+
 ### Studio (optional dashboard)
 
 ```sh
@@ -373,6 +403,7 @@ tokens travel there.
 | `core` | Rust | Gateway (API keys, JWT verification, rate limiting), storage, realtime |
 | `auth` | Python | Sign-up, sign-in, tokens; the only holder of the signing key |
 | `postgrest` | PostgREST | Auto-generated REST API, reachable only through `core` |
+| `functions` (optional) | Python + nsjail | Runs `functions/<name>/main.py`, one sandbox per call |
 | `studio` (optional) | Python + TS | Admin dashboard on 127.0.0.1:3001 |
 | `db` | PostgreSQL 18 | Data, row level security; ships pgvector, pg_cron and pgmq (`postgres/Dockerfile`) |
 
