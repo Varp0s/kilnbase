@@ -81,7 +81,8 @@ a migration, a service that does not become healthy — it restores the data fro
 previous images again (tagged `kilnbase-rollback/<service>:<time>`). The stack then runs from
 `kilnbase-rollback.json`, an extra compose file that pins those images; the command to start it is printed, and
 the next successful `upgrade` removes it. The backup is always kept. Expect downtime for as long as the backup
-and the start of the new version take.
+and the start of the new version take. If `upgrade` itself is killed midway, `core` may stay stopped:
+run `docker compose up -d` (the backup it was writing is complete only if the file exists).
 
 ### TypeScript types
 
