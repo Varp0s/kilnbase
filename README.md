@@ -296,6 +296,21 @@ room.send("cursor", { x: 10 });
 
 See [docs/realtime-protocol.md](docs/realtime-protocol.md).
 
+### Extensions
+
+The `db` image includes **pgvector**, **pg_cron** and **pgmq**; none is enabled until you create it, for example
+in a migration:
+
+```sql
+create extension if not exists vector with schema extensions;  -- column type: extensions.vector(1536)
+create extension if not exists pgmq;                            -- queues in the pgmq schema
+create extension if not exists pg_cron;                         -- jobs in the postgres database
+```
+
+Put extensions in the `extensions` schema rather than `public`: API roles can use their types and operators,
+but their functions are not served as `/rest/v1/rpc` endpoints. pgmq and pg_cron keep their own schemas,
+which the API never serves. Existing installs move to the new image with `kilnbase upgrade`.
+
 ### Logs
 
 `core` and `auth` write one JSON object per line to stderr (`docker compose logs core auth`):
@@ -314,7 +329,7 @@ tokens travel there.
 | `core` | Rust | Gateway (API keys, JWT verification, rate limiting), storage, realtime |
 | `auth` | Python | Sign-up, sign-in, tokens; the only holder of the signing key |
 | `postgrest` | PostgREST | Auto-generated REST API, reachable only through `core` |
-| `db` | PostgreSQL 18 | Data, row level security |
+| `db` | PostgreSQL 18 | Data, row level security; ships pgvector, pg_cron and pgmq (`postgres/Dockerfile`) |
 
 API keys are ES256 JWTs. `KILNBASE_ANON_KEY` is safe for clients; `KILNBASE_SERVICE_ROLE_KEY` bypasses row level security and must never leave your servers.
 

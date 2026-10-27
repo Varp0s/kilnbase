@@ -23,6 +23,9 @@ jobs:
           - name: kilnbase-auth
             context: .
             dockerfile: auth/Dockerfile
+          - name: kilnbase-postgres
+            context: postgres
+            dockerfile: postgres/Dockerfile
     steps:
       - uses: actions/checkout@v7.0.1
       - run: scripts/release-gate.sh
