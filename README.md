@@ -311,6 +311,36 @@ Put extensions in the `extensions` schema rather than `public`: API roles can us
 but their functions are not served as `/rest/v1/rpc` endpoints. pgmq and pg_cron keep their own schemas,
 which the API never serves. Existing installs move to the new image with `kilnbase upgrade`.
 
+### Webhooks
+
+```sql
+-- returns the webhook row, including the generated signing secret
+select * from kilnbase.create_webhook('new-orders', 'public.orders', array['INSERT', 'UPDATE'],
+                                      'https://example.com/hooks/orders');
+select kilnbase.drop_webhook('new-orders');
+select * from kilnbase.webhook_deliveries order by id desc limit 20;  -- delivery log
+```
+
+A write queues its deliveries in the same transaction, so a rolled-back write sends nothing. The auth service
+POSTs `{"type", "schema", "table", "record", "old_record"}` as JSON, retries failures with backoff (10 s,
+20 s, … up to an hour, `max_attempts` tries, default 8) and keeps the log for 7 days. Delivery is at least
+once and unordered: dedupe on the `X-Kilnbase-Delivery` header. Redirects are not followed. Only superusers can
+manage webhooks; they can target any URL, including internal ones.
+
+Verify the signature before trusting a request:
+
+```python
+import hashlib, hmac, time
+
+
+def verify(secret: str, headers, body: bytes) -> bool:
+    ts = headers["X-Kilnbase-Timestamp"]
+    if abs(time.time() - int(ts)) > 300:  # reject replays
+        return False
+    mac = hmac.new(secret.encode(), ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(headers["X-Kilnbase-Signature"], f"v1={mac}")
+```
+
 ### Logs
 
 `core` and `auth` write one JSON object per line to stderr (`docker compose logs core auth`):

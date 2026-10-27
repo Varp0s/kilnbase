@@ -1,9 +1,10 @@
+import asyncio
 import hmac
 import re
 import secrets
 import smtplib
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Literal
 from urllib.parse import urlencode
 
@@ -19,6 +20,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
+from . import webhooks
 from .config import Config
 from .log import log
 from .mailer import Mailer
@@ -175,9 +177,13 @@ def create_app(config: Config) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.pool = await asyncpg.create_pool(config.database_url, min_size=1, max_size=10)
         app.state.http = httpx.AsyncClient(timeout=10)
+        worker = asyncio.create_task(webhooks.run(app.state.pool, app.state.http))
         try:
             yield
         finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
             await app.state.http.aclose()
             await app.state.pool.close()
 

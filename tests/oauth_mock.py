@@ -1,6 +1,8 @@
 """Minimal OAuth2/OIDC provider for end-to-end tests. Standard library only.
 
 POST /next {"sub", "email", "email_verified"} chooses who the next /authorize signs in.
+Also a webhook receiver: POST /hooks/<name> is recorded (and answered with the status set by
+POST /hooks-status/<name> {"status": 500}, default 200); GET /hooks/<name> lists what arrived.
 """
 
 import base64
@@ -14,6 +16,8 @@ CLIENT_ID, CLIENT_SECRET = "mock-client", "mock-secret"
 next_user = {"sub": "mock-1", "email": "mock@example.com", "email_verified": True}
 codes: dict[str, dict] = {}
 tokens: dict[str, dict] = {}
+hooks: dict[str, list[dict]] = {}
+hook_status: dict[str, int] = {}
 
 
 def s256(verifier: str) -> str:
@@ -51,6 +55,8 @@ class Handler(BaseHTTPRequestHandler):
                 "Location", f"{q['redirect_uri']}?{urlencode({'code': code, 'state': q['state']})}"
             )
             self.end_headers()
+        elif url.path.startswith("/hooks/"):
+            return self._json(200, {"received": hooks.get(url.path[7:], [])})
         elif url.path == "/userinfo":
             token = self.headers.get("Authorization", "").removeprefix("Bearer ")
             user = tokens.get(token)
@@ -61,6 +67,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global next_user
         url = urlsplit(self.path)
+        if url.path.startswith("/hooks/"):
+            name = url.path[7:]
+            entry = {"headers": dict(self.headers), "body": self._body().decode()}
+            hooks.setdefault(name, []).append(entry)
+            return self._json(hook_status.get(name, 200), {})
+        if url.path.startswith("/hooks-status/"):
+            hook_status[url.path[14:]] = json.loads(self._body())["status"]
+            return self._json(200, {})
         if url.path == "/next":
             next_user = json.loads(self._body())
             return self._json(200, next_user)

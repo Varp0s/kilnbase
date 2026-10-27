@@ -63,6 +63,8 @@ First release candidate (planned as 0.1.0).
 - **CLI**: `kilnbase init` (keys and secrets) and `kilnbase doctor` (secret and database security audit).
 - **Postgres image** (`ghcr.io/varp0s/kilnbase-postgres`) with pgvector, pg_cron and pgmq available (not
   enabled), plus an `extensions` schema that keeps extension functions out of the REST API.
+- **Webhooks**: `kilnbase.create_webhook()` sends table changes as signed (HMAC-SHA256) POSTs, queued in the
+  writing transaction, retried with backoff and logged in `kilnbase.webhook_deliveries`.
 - **Logs**: `core` and `auth` write JSON lines in one shape (`ts`, `level`, `service`, `msg`), including a
   request log without query strings, so tokens in links never reach the logs.
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
