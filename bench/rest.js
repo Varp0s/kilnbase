@@ -1,5 +1,5 @@
 // Gateway overhead: the same PostgREST query through the Rust gateway and directly.
-// Run with scripts/bench.sh, which joins the compose network and passes the keys.
+// Run with bench/run.sh, which joins the compose network and passes the keys.
 import http from "k6/http";
 import { check } from "k6";
 

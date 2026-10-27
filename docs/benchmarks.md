@@ -3,7 +3,7 @@
 Reproduce with the stack running:
 
 ```sh
-scripts/bench.sh [VUS] [DURATION]   # defaults: 20 virtual users, 20 s per scenario
+bench/run.sh [VUS] [DURATION]   # defaults: 20 virtual users, 20 s per scenario
 ```
 
 k6 runs inside the compose network and sends the same PostgREST query (`10 rows, ordered`) three ways:

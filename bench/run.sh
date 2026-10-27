@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs bench/*.js with k6 inside the compose network against a running stack.
-# Usage: scripts/bench.sh [VUS] [DURATION]
+# Usage: bench/run.sh [VUS] [DURATION]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
