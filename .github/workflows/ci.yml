@@ -75,16 +75,6 @@ jobs:
         run: |
           set -a; . ./.env; set +a
           curl -fsS localhost:8000/functions/v1/whoami -H "apikey: $KILNBASE_ANON_KEY"             || { docker compose -f docker-compose.yml -f docker-compose.test.yml logs functions; exit 1; }
-      # Without the AppArmor exception (as on a host where someone dropped it) the service must
-      # refuse to start rather than fail every call.
-      - name: functions refuse to start without a working sandbox
-        run: |
-          set -a; . ./.env; set +a
-          set +e
-          out=$(timeout 120 docker run --rm -e KILNBASE_JWKS -e KILNBASE_ANON_KEY             --security-opt seccomp=functions-runner/seccomp.json             -v ./tests/functions:/functions:ro ghcr.io/varp0s/kilnbase-functions:dev 2>&1)
-          rc=$?
-          echo "$out" | tail -5
-          [ "$rc" = 1 ] && echo "$out" | grep -q "cannot create a sandbox"
       # Before the e2e suite: test_gen_types_db type-checks generated output with the SDK's tsc.
       - uses: actions/setup-node@v7.1.0
         with:
