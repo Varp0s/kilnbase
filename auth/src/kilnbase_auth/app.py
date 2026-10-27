@@ -6,7 +6,7 @@ import smtplib
 import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Literal
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 import asyncpg
 import httpx2 as httpx
@@ -28,6 +28,7 @@ from .mfa import matching_step
 from .oauth import (
     CODE_LIFETIME,
     STATE_LIFETIME,
+    ExternalUser,
     authorize_redirect,
     digest,
     fetch_user,
@@ -36,6 +37,7 @@ from .oauth import (
     redirect_allowed,
 )
 from .ratelimit import FailureLimiter
+from .saml import MAX_RESPONSE_BYTES, SamlError, authn_redirect, new_request_id, verify_response
 from .tokens import (
     ACCESS_TOKEN_LIFETIME,
     REFRESH_TOKEN_LIFETIME,
@@ -393,7 +395,10 @@ def create_app(config: Config) -> FastAPI:
             return await issue_session(conn, row["user_id"], row["email"], row["session_id"])
 
     providers = config.providers or {}
+    identity_providers = config.identity_providers or {}
     callback_url = f"{config.public_url}/auth/v1/callback"
+    # SAML responses are posted to the same callback; this names us to the IdP.
+    sp_entity_id = f"{config.public_url}/auth/v1/saml"
 
     @app.get("/authorize")
     async def authorize(
@@ -401,7 +406,8 @@ def create_app(config: Config) -> FastAPI:
     ):
         """Browser entry point for provider sign-in; reached without an API key."""
         selected = providers.get(provider)
-        if selected is None:
+        idp = identity_providers.get(provider)
+        if selected is None and idp is None:
             return error(400, "unknown_provider", "this provider is not enabled")
         if code_challenge_method != "S256" or not re.fullmatch(
             r"[A-Za-z0-9_-]{43}", code_challenge
@@ -409,7 +415,9 @@ def create_app(config: Config) -> FastAPI:
             return error(400, "invalid_request", "an S256 code_challenge is required")
         if not redirect_allowed(redirect_to, [config.public_url, *config.redirect_urls]):
             return error(400, "redirect_not_allowed", "add this URL to KILNBASE_AUTH_REDIRECT_URLS")
-        state, verifier = new_secret(), new_secret()
+        state = new_secret()
+        # For SAML the "verifier" is the AuthnRequest ID the response must answer.
+        verifier = new_request_id() if idp else new_secret()
         async with app.state.pool.acquire() as conn:
             await conn.execute(
                 "delete from auth.oauth_states"
@@ -426,27 +434,57 @@ def create_app(config: Config) -> FastAPI:
                 verifier,
                 code_challenge,
             )
-        return RedirectResponse(authorize_redirect(selected, callback_url, state, verifier), 302)
+        if idp:
+            url = authn_redirect(idp, sp_entity_id, callback_url, verifier, state)
+        else:
+            url = authorize_redirect(selected, callback_url, state, verifier)
+        return RedirectResponse(url, 302)
 
-    @app.get("/callback")
-    async def callback(state: str = "", code: str = "", error_: str = Query("", alias="error")):
+    async def take_flow(state: str):
         async with app.state.pool.acquire() as conn:
-            flow = await conn.fetchrow(
+            return await conn.fetchrow(
                 "delete from auth.oauth_states where state_hash = $1"
                 " and created_at > now() - make_interval(secs => $2) returning *",
                 digest(state),
                 STATE_LIFETIME,
             )
-        if flow is None:
+
+    def back_to(target: str, **params: str) -> RedirectResponse:
+        separator = "&" if "?" in target else "?"
+        return RedirectResponse(f"{target}{separator}{urlencode(params)}", 302)
+
+    @app.post("/callback")
+    async def saml_callback(request: Request):
+        """The IdP's HTTP-POST binding: a form with SAMLResponse and RelayState (our state)."""
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > MAX_RESPONSE_BYTES * 2:
+                return error(413, "too_large", "SAML response is too large")
+        form = {k: v[0] for k, v in parse_qs(body.decode("latin-1")).items()}
+        flow = await take_flow(form.get("RelayState", ""))
+        if flow is None or flow["provider"] not in identity_providers:
             return error(400, "invalid_state", "sign-in link expired or was already used")
-        target = flow["redirect_to"]
+        try:
+            external = verify_response(
+                form.get("SAMLResponse", ""),
+                identity_providers[flow["provider"]],
+                sp_entity_id=sp_entity_id,
+                acs_url=callback_url,
+                request_id=flow["provider_verifier"],
+            )
+        except SamlError as e:
+            log.warning("SAML response from %s rejected: %s", flow["provider"], e)
+            return back_to(flow["redirect_to"], error="provider_error")
+        return await finish_sign_in(flow, f"saml:{flow['provider']}", external)
 
-        def back(**params: str) -> RedirectResponse:
-            separator = "&" if "?" in target else "?"
-            return RedirectResponse(f"{target}{separator}{urlencode(params)}", 302)
-
+    @app.get("/callback")
+    async def callback(state: str = "", code: str = "", error_: str = Query("", alias="error")):
+        flow = await take_flow(state)
+        if flow is None or flow["provider"] not in providers:
+            return error(400, "invalid_state", "sign-in link expired or was already used")
         if error_ or not code:
-            return back(error="access_denied")
+            return back_to(flow["redirect_to"], error="access_denied")
         try:
             external = await fetch_user(
                 app.state.http,
@@ -456,12 +494,19 @@ def create_app(config: Config) -> FastAPI:
                 flow["provider_verifier"],
             )
         except httpx.HTTPError, KeyError, ValueError, TypeError:
-            return back(error="provider_error")
+            return back_to(flow["redirect_to"], error="provider_error")
+        return await finish_sign_in(flow, flow["provider"], external)
+
+    async def finish_sign_in(flow, identity_provider: str, external: ExternalUser):
+        """Finds or links the user, then hands the app a one-time code for its PKCE verifier."""
+
+        def back(**params: str) -> RedirectResponse:
+            return back_to(flow["redirect_to"], **params)
 
         async with app.state.pool.acquire() as conn, conn.transaction():
             user_id = await conn.fetchval(
                 "select user_id from auth.identities where provider = $1 and provider_user_id = $2",
-                flow["provider"],
+                identity_provider,
                 external.id,
             )
             if user_id is None:
@@ -481,7 +526,7 @@ def create_app(config: Config) -> FastAPI:
                 await conn.execute(
                     "insert into auth.identities (provider, provider_user_id, user_id, email)"
                     " values ($1, $2, $3, $4)",
-                    flow["provider"],
+                    identity_provider,
                     external.id,
                     user_id,
                     external.email,

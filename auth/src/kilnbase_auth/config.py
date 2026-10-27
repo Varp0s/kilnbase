@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 import jwt
 
 from .oauth import Provider, load_providers
+from .saml import IdentityProvider, load_identity_providers
 
 # Value shipped in .env.example; refusing it stops people from running with published secrets.
 PLACEHOLDER = "change-me"
@@ -26,6 +27,7 @@ class Config:
     public_url: str = "http://localhost:8000"
     redirect_urls: tuple[str, ...] = ()
     providers: dict[str, Provider] | None = None
+    identity_providers: dict[str, IdentityProvider] | None = None
     smtp_url: str | None = None
     smtp_from: str = "Kilnbase <no-reply@localhost>"
     mails_per_ip_hour: int = 30
@@ -69,8 +71,13 @@ def load(env: Mapping[str, str]) -> Config:
     )
     try:
         providers = load_providers(env)
+        identity_providers = load_identity_providers(env)
     except ValueError as e:
         raise ConfigError(str(e)) from e
+    # Both kinds are chosen by name at /authorize.
+    if clash := providers.keys() & identity_providers.keys():
+        names = ", ".join(sorted(clash))
+        raise ConfigError(f"provider names used for both OAuth and SAML: {names}")
 
     smtp_url = env.get("KILNBASE_SMTP_URL", "").strip() or None
     if smtp_url and not smtp_url.startswith(("smtp://", "smtps://")):
@@ -89,6 +96,7 @@ def load(env: Mapping[str, str]) -> Config:
         public_url=public_url,
         redirect_urls=redirect_urls,
         providers=providers,
+        identity_providers=identity_providers,
         database_url=database_url,
         private_jwk=jwk,
         authenticator_password=authenticator_password,

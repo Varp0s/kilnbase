@@ -249,6 +249,22 @@ The flow uses PKCE twice (with the provider, and between your app and Kilnbase),
 URLs and an intercepted code is useless. Redirects only go to allow-listed URLs, and a provider account is only
 linked to an existing user when the provider reports the email as verified.
 
+**SAML single sign-on.** Register Kilnbase with your IdP (Okta, Entra ID, Keycloak, ...) as entity ID
+`<KILNBASE_PUBLIC_URL>/auth/v1/saml` with ACS URL `<KILNBASE_PUBLIC_URL>/auth/v1/callback` (HTTP-POST), then set:
+
+```sh
+KILNBASE_SAML_ACME_SSO_URL=https://idp.acme.com/sso/saml   # the IdP's HTTP-Redirect SSO URL
+KILNBASE_SAML_ACME_ENTITY_ID=https://idp.acme.com
+KILNBASE_SAML_ACME_CERT=MIIC...                              # signing certificate, PEM or base64 body
+KILNBASE_SAML_ACME_DOMAINS=acme.com                          # emails this IdP may sign in as
+```
+
+Apps start it like an OAuth sign-in: `kb.auth.signInWithOAuth("acme", { redirectTo })`. Responses must be signed
+with SHA-2 by that certificate, answer a request Kilnbase sent (no IdP-initiated sign-in, no replays), and pass
+audience, recipient and time checks; values are read only from the signed part, and DTDs are refused. An IdP can
+only create or link accounts for emails in its `DOMAINS`. Not supported: encrypted assertions, signed
+AuthnRequests and single logout.
+
 **Passwordless email.** `POST /auth/v1/otp {"email", "redirect_to"?}` mails a 6-digit code (and a magic link when
 `redirect_to` is allow-listed); `POST /auth/v1/verify` with `{"type":"email","email","token"}` or
 `{"type":"magiclink","token"}` returns a session. Codes are single-use, expire after 10 minutes and die after

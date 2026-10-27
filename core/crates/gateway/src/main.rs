@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, head, post};
 use axum::{Json, Router};
@@ -188,9 +188,13 @@ async fn auth_service(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request,
 ) -> Response {
-    // Provider sign-in starts and ends with browser navigations, which cannot carry headers.
-    let browser_redirect = req.method() == axum::http::Method::GET
-        && matches!(req.uri().path(), "/auth/v1/authorize" | "/auth/v1/callback");
+    // Provider sign-in starts and ends with browser navigations, which cannot carry headers;
+    // SAML IdPs return by posting a form to the callback.
+    let browser_redirect = matches!(
+        (req.method(), req.uri().path()),
+        (&Method::GET, "/auth/v1/authorize" | "/auth/v1/callback")
+            | (&Method::POST, "/auth/v1/callback")
+    );
     if !browser_redirect && let Err(e) = auth::check_api_key(&st.keys, req.headers()) {
         return e.into_response();
     }
@@ -275,7 +279,7 @@ fn valid_function_name(name: &str) -> bool {
 }
 
 fn cors_layer(origins: Option<&[String]>) -> tower_http::cors::CorsLayer {
-    use axum::http::{HeaderName, Method};
+    use axum::http::HeaderName;
     use tower_http::cors::{AllowOrigin, CorsLayer};
 
     let allow_origin = match origins {
