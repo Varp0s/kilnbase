@@ -280,6 +280,17 @@ room.send("cursor", { x: 10 });
 
 See [docs/realtime-protocol.md](docs/realtime-protocol.md).
 
+### Logs
+
+`core` and `auth` write one JSON object per line to stderr (`docker compose logs core auth`):
+
+```json
+{"ts": 1793080534.003, "level": "info", "service": "core", "msg": "request", "method": "GET", "path": "/rest/v1/todos", "status": 200, "ms": 1.2}
+```
+
+Request lines never include the query string, because signed links, API keys, magic-link tokens and access
+tokens travel there.
+
 ## Architecture
 
 | Service | Language | Role |

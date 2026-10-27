@@ -80,7 +80,7 @@ pub fn spawn_listener(database_url: String, pool: Pool, hub: Hub) {
         let mut seen = Seen::default();
         loop {
             if let Err(e) = listen(&database_url, &pool, &hub, &mut seen).await {
-                eprintln!("kilnbase-core: realtime listener error: {e}");
+                log_error!("realtime listener error: {e}");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -89,7 +89,7 @@ pub fn spawn_listener(database_url: String, pool: Pool, hub: Hub) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             if let Err(e) = prune(&pruner).await {
-                eprintln!("kilnbase-core: pruning realtime events failed: {e:?}");
+                log_error!("pruning realtime events failed: {e:?}");
             }
         }
     });
@@ -190,20 +190,20 @@ async fn listen(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("kilnbase-core: realtime connection lost: {e}");
+                    log_error!("realtime connection lost: {e}");
                     break;
                 }
             }
         }
     });
     client.batch_execute(&format!("listen {CHANNEL}")).await?;
-    eprintln!("kilnbase-core: realtime listening");
+    log_info!("realtime listening");
 
     // LISTEN is active before the replay query, so nothing can fall between the two.
     if seen.newest.is_none() {
         // First connection: without a baseline, a drop before any event would skip the replay.
         if let Err(e) = baseline(pool, seen).await {
-            eprintln!("kilnbase-core: realtime baseline failed: {e:?}");
+            log_error!("realtime baseline failed: {e:?}");
         }
     } else if let Some(newest) = seen.newest {
         match load_events(pool, None, newest - RECONNECT_OVERLAP, i64::MAX).await {
@@ -214,7 +214,7 @@ async fn listen(
                     }
                 }
             }
-            Err(e) => eprintln!("kilnbase-core: realtime replay failed: {e:?}"),
+            Err(e) => log_error!("realtime replay failed: {e:?}"),
         }
     }
 
@@ -226,7 +226,7 @@ async fn listen(
                     drop(hub.send(Arc::new(change)));
                 }
             }
-            Err(e) => eprintln!("kilnbase-core: bad realtime payload: {e}"),
+            Err(e) => log_error!("bad realtime payload: {e}"),
         }
     }
     drop(client);
@@ -428,7 +428,7 @@ async fn render(pool: &Pool, caller: &Caller, change: &Change, ids: &[&String]) 
             Ok(Some(record)) => json!({ "record": record }),
             Ok(None) => return Vec::new(),
             Err(e) => {
-                eprintln!("kilnbase-core: realtime visibility check failed: {e:?}");
+                log_error!("realtime visibility check failed: {e:?}");
                 return Vec::new();
             }
         }
@@ -455,7 +455,7 @@ async fn replay(pool: &Pool, caller: &Caller, id: &str, table: &str, since: i64)
     let (changes, oldest) = match load_events(pool, Some(table), since, REPLAY_LIMIT + 1).await {
         Ok(found) => found,
         Err(e) => {
-            eprintln!("kilnbase-core: realtime resume failed: {e:?}");
+            log_error!("realtime resume failed: {e:?}");
             return vec![resync];
         }
     };
@@ -524,7 +524,7 @@ async fn subscribe(
             "run select kilnbase.enable_realtime('public.<table>') first",
         ),
         Err(e) => {
-            eprintln!("kilnbase-core: realtime subscribe check failed: {e:?}");
+            log_error!("realtime subscribe check failed: {e:?}");
             error("internal", "internal error")
         }
     }

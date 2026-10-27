@@ -414,7 +414,7 @@ pub(crate) async fn remove(
     if let Err(e) = tokio::fs::remove_file(storage.object_path(&id)).await
         && e.kind() != std::io::ErrorKind::NotFound
     {
-        eprintln!("kilnbase-core: could not remove object file {id}: {e}");
+        log_error!("could not remove object file {id}: {e}");
     }
     Ok(())
 }
@@ -650,7 +650,7 @@ async fn transform(
         .parse()
         .map_err(|_| bad_request("invalid transformation"))?;
     let res = st.http.get(uri).await.map_err(|e| {
-        eprintln!("kilnbase-core: imgproxy error: {e}");
+        log_error!("imgproxy error: {e}");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "upstream_unavailable",
@@ -658,7 +658,7 @@ async fn transform(
         )
     })?;
     if !res.status().is_success() {
-        eprintln!("kilnbase-core: imgproxy answered {}", res.status());
+        log_error!("imgproxy answered {}", res.status());
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "cannot_transform",
@@ -753,7 +753,7 @@ fn encode_path(name: &str) -> String {
 }
 
 fn io_error(e: std::io::Error) -> ApiError {
-    eprintln!("kilnbase-core: storage io error: {e}");
+    log_error!("storage io error: {e}");
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal",

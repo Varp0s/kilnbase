@@ -85,7 +85,7 @@ fn conflict(message: &'static str) -> ApiError {
 }
 
 fn io_error(e: std::io::Error) -> ApiError {
-    eprintln!("kilnbase-core: resumable upload io error: {e}");
+    log_error!("resumable upload io error: {e}");
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal",

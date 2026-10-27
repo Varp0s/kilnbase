@@ -1,14 +1,15 @@
 import smtplib
 import ssl
-import sys
 from email.message import EmailMessage
 from urllib.parse import unquote, urlsplit
+
+from .log import log
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "mailpit", "mailhog"}
 
 
 class Mailer:
-    """Sends mail over SMTP; without KILNBASE_SMTP_URL it prints messages for local development.
+    """Sends mail over SMTP; without KILNBASE_SMTP_URL it logs messages for local development.
 
     smtps:// uses implicit TLS; smtp:// requires STARTTLS except for local test servers.
     """
@@ -25,7 +26,7 @@ class Mailer:
         msg.set_content(body)
         if self.url is None:
             # shortcut: dev-only fallback; codes land in logs, so production needs SMTP.
-            print(f"kilnbase-auth: [no SMTP configured] mail to {to}\n{body}", file=sys.stderr)
+            log.warning("no SMTP configured; mail to %s:\n%s", to, body)
             return
         host, user, password = self.url.hostname or "", self.url.username, self.url.password
         context = ssl.create_default_context()

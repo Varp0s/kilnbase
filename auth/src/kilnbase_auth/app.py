@@ -2,7 +2,6 @@ import hmac
 import re
 import secrets
 import smtplib
-import sys
 import uuid
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -21,6 +20,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from .config import Config
+from .log import log
 from .mailer import Mailer
 from .mfa import matching_step
 from .oauth import (
@@ -558,7 +558,7 @@ def create_app(config: Config) -> FastAPI:
         try:
             await run_in_threadpool(mailer.send, email, subject, text)
         except (OSError, smtplib.SMTPException) as e:
-            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
+            log.error("sending mail failed: %s", e)
             await app.state.pool.execute(
                 "delete from auth.one_time_tokens where email = $1 and purpose = $2", email, purpose
             )
@@ -859,7 +859,7 @@ def create_app(config: Config) -> FastAPI:
                 f"It expires in {OTP_LIFETIME // 60} minutes.\n",
             )
         except (OSError, smtplib.SMTPException) as e:
-            print(f"kilnbase-auth: sending mail failed: {e}", file=sys.stderr)
+            log.error("sending mail failed: %s", e)
             await app.state.pool.execute(
                 "delete from auth.email_changes where user_id = $1::uuid", claims["sub"]
             )
@@ -874,7 +874,7 @@ def create_app(config: Config) -> FastAPI:
                 "If that was not you, reset your password now.\n",
             )
         except (OSError, smtplib.SMTPException) as e:
-            print(f"kilnbase-auth: sending notice failed: {e}", file=sys.stderr)
+            log.error("sending notice failed: %s", e)
         return JSONResponse({"email_change_sent": True}, status_code=202)
 
     @app.post("/user/email/verify")

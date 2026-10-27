@@ -48,7 +48,7 @@ pub async fn forward(
             res.map(Body::new)
         }
         Err(e) => {
-            eprintln!("kilnbase-core: upstream {upstream} error: {e}");
+            log_error!("upstream {upstream} error: {e}");
             ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 "upstream_unavailable",

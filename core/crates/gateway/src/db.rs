@@ -26,7 +26,7 @@ pub fn pool(url: &str) -> Result<Pool, String> {
 
 pub async fn client(pool: &Pool) -> Result<Object, ApiError> {
     pool.get().await.map_err(|e| {
-        eprintln!("kilnbase-core: database unavailable: {e}");
+        log_error!("database unavailable: {e}");
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "database_unavailable",
@@ -83,7 +83,7 @@ pub fn internal(e: tokio_postgres::Error) -> ApiError {
             ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", "invalid value")
         }
         _ => {
-            eprintln!("kilnbase-core: database error: {e}");
+            log_error!("database error: {e}");
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",

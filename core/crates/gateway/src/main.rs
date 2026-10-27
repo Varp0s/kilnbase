@@ -1,3 +1,6 @@
+// Declared first so its macros are in scope in every other module.
+#[macro_use]
+mod log;
 mod auth;
 mod channels;
 mod config;
@@ -37,7 +40,7 @@ async fn main() -> ExitCode {
     let cfg = match config::load(|k| std::env::var(k).ok()) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("kilnbase-core: {e}");
+            log_error!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -45,7 +48,7 @@ async fn main() -> ExitCode {
     let pool = match db::pool(&cfg.database_url) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("kilnbase-core: {e}");
+            log_error!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -63,8 +66,8 @@ async fn main() -> ExitCode {
         busy_uploads: Default::default(),
     };
     if let Err(e) = storage.prepare_dirs().await {
-        eprintln!(
-            "kilnbase-core: storage directory {} is not writable: {e}",
+        log_error!(
+            "storage directory {} is not writable: {e}",
             storage.dir.display()
         );
         return ExitCode::FAILURE;
@@ -125,17 +128,18 @@ async fn main() -> ExitCode {
         .route("/storage/v1/s3/{*rest}", any(s3::handle))
         .merge(resumable)
         .layer(cors)
+        .layer(axum::middleware::from_fn(log::access))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("kilnbase-core: cannot bind {addr}: {e}");
+            log_error!("cannot bind {addr}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("kilnbase-core: listening on {addr}");
+    log_info!("listening on {addr}");
 
     if let Err(e) = axum::serve(
         listener,
@@ -144,7 +148,7 @@ async fn main() -> ExitCode {
     .with_graceful_shutdown(shutdown_signal())
     .await
     {
-        eprintln!("kilnbase-core: server error: {e}");
+        log_error!("server error: {e}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

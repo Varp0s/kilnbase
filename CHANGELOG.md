@@ -59,6 +59,8 @@ First release candidate (planned as 0.1.0).
   storage features as the JS client, including image transforms, and realtime (table changes with resume,
   broadcast and presence) on a background thread that reconnects as the current user after sign-in/out.
 - **CLI**: `kilnbase init` (keys and secrets) and `kilnbase doctor` (secret and database security audit).
+- **Logs**: `core` and `auth` write JSON lines in one shape (`ts`, `level`, `service`, `msg`), including a
+  request log without query strings, so tokens in links never reach the logs.
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
 - **Migrations** are checksummed; edited or unknown applied migrations stop the auth service.
 - **Release gate** that keeps third-party platform code and dependencies out of shipped artifacts;

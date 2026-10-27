@@ -1251,7 +1251,7 @@ async fn delete_object(st: &AppState, caller: &Caller, t: &Target) -> Result<Res
 }
 
 fn io_error(e: std::io::Error) -> S3Error {
-    eprintln!("kilnbase-core: s3 io error: {e}");
+    log_error!("s3 io error: {e}");
     err(
         StatusCode::INTERNAL_SERVER_ERROR,
         "InternalError",

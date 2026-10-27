@@ -129,7 +129,7 @@ impl Channels {
             Ok(true) => {}
             Ok(false) => return tagged(error("forbidden", "not allowed to join this channel")),
             Err(e) => {
-                eprintln!("kilnbase-core: channel authorisation failed: {e:?}");
+                log_error!("channel authorisation failed: {e:?}");
                 return tagged(error("internal", "internal error"));
             }
         }
@@ -169,7 +169,7 @@ impl Channels {
             Ok(true) => {}
             Ok(false) => return Some(error("forbidden", "not allowed to send on this channel")),
             Err(e) => {
-                eprintln!("kilnbase-core: channel authorisation failed: {e:?}");
+                log_error!("channel authorisation failed: {e:?}");
                 return Some(error("internal", "internal error"));
             }
         }
