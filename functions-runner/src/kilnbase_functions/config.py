@@ -23,6 +23,8 @@ class Config:
     timeout: int = 10
     memory_mb: int = 256
     concurrency: int = 8
+    # Where functions/requirements.txt was installed (set at boot), bound into every jail.
+    deps_dir: Path | None = None
 
 
 def _int(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:

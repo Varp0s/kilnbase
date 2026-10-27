@@ -65,7 +65,8 @@ First release candidate (planned as 0.1.0).
   enabled), plus an `extensions` schema that keeps extension functions out of the REST API.
 - **Functions** (optional, `COMPOSE_PROFILES=functions`): Python handlers at `/functions/v1/<name>`, each call in
   its own nsjail sandbox (namespaces, read-only root, syscall filter, time/memory/process limits) on a network
-  that cannot reach the database; caller tokens are verified again inside the runner.
+  that cannot reach the database; caller tokens are verified again inside the runner. `functions/requirements.txt`
+  is installed at start-up from wheels only.
 - **Studio** (optional, `COMPOSE_PROFILES=studio`): tables with their RLS state and policies, users, webhook
   deliveries, and "view as user", which shows exactly the rows the REST API returns to a given user or to anon.
 - **Webhooks**: `kilnbase.create_webhook()` sends table changes as signed (HMAC-SHA256) POSTs, queued in the

@@ -33,6 +33,8 @@ def main() -> None:
     request = json.load(sys.stdin)
     request["body"] = base64.b64decode(request.pop("body_base64"))
     sys.path.insert(0, os.getcwd())
+    if len(sys.argv) > 2:  # packages from functions/requirements.txt
+        sys.path.insert(1, sys.argv[2])
     spec = importlib.util.spec_from_file_location("main", os.path.join(os.getcwd(), "main.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

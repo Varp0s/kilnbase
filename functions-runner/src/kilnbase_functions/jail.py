@@ -12,6 +12,7 @@ RESPONSE_LIMIT = 6 * 1024 * 1024  # base64 of a 4 MiB body plus headers
 LOG_LIMIT = 16 * 1024
 JAIL_TMP = "/tmp"  # noqa: S108 - a private tmpfs inside each jail
 MOUNT = "/mnt"  # exists in the read-only root; the function's directory is bound here
+DEPS_MOUNT = "/opt"  # likewise for the packages from functions/requirements.txt
 
 
 @dataclass
@@ -47,6 +48,8 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "--disable_clone_newnet",
         "--tmpfsmount", JAIL_TMP,
         "--tmpfsmount", str(config.functions_dir),
+        *(["--tmpfsmount", str(config.deps_dir.parent)] if config.deps_dir else []),
+        *(["--bindmount_ro", f"{config.deps_dir}:{DEPS_MOUNT}"] if config.deps_dir else []),
         "--bindmount_ro", f"{function_dir}:{MOUNT}",
         "--cwd", MOUNT,
         "--time_limit", str(config.timeout),
@@ -60,6 +63,7 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         *(arg for k, v in env.items() for arg in ("--env", f"{k}={v}")),
         "--",
         "/usr/local/bin/python3", "-I", "-B", str(BOOTSTRAP), str(response_fd),
+        *([DEPS_MOUNT] if config.deps_dir else []),
     ]  # fmt: skip
 
 

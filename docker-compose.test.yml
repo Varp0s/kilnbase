@@ -58,3 +58,4 @@ services:
       KILNBASE_FUNCTIONS_TIMEOUT: "3"
     volumes: !override
       - ./tests/functions:/functions:ro
+      - functions-deps:/deps

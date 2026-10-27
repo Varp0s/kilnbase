@@ -30,7 +30,7 @@ COPY functions-runner ./functions-runner
 COPY cli/pyproject.toml ./cli/pyproject.toml
 COPY studio/pyproject.toml ./studio/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-functions \
-    && useradd --system --uid 10001 kilnbase
+    && useradd --system --uid 10001 kilnbase     && mkdir /deps && chown kilnbase /deps
 USER kilnbase
 EXPOSE 9000
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "kilnbase_functions"]

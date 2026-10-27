@@ -85,3 +85,9 @@ def test_runner_rejects_forged_tokens_sent_from_inside(client, keys):
 def test_runaway_functions_are_contained(client, keys, what, status):
     assert call(client, keys, "probe", what=what).status_code == status
     assert call(client, keys, "whoami").status_code == 201  # the next call is unaffected
+
+
+def test_packages_from_requirements_are_importable(client, keys):
+    r = call(client, keys, "deps")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"six": "1.17.0", "path": "/opt/six.py"}

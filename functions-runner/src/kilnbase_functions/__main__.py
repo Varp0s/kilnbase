@@ -4,12 +4,13 @@ import subprocess
 import sys
 import tempfile
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
 from kilnbase_auth.log import CONFIG, log
 
-from . import jail
+from . import deps, jail
 from .app import create_app
 from .config import ConfigError, load
 
@@ -41,6 +42,11 @@ def main() -> None:
     try:
         config = load(os.environ)
     except ConfigError as e:
+        log.error("%s", e)
+        sys.exit(1)
+    try:
+        config = replace(config, deps_dir=deps.install(config.functions_dir))
+    except deps.DepsError as e:
         log.error("%s", e)
         sys.exit(1)
     if problem := jail_works(config):

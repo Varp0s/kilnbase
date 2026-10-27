@@ -115,6 +115,8 @@ services:
       KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
     volumes:
       - ./functions:/functions:ro
+      # Packages from functions/requirements.txt, installed (wheels only) when the service starts.
+      - functions-deps:/deps
     networks: [functions]
     read_only: true
     tmpfs: [/tmp]
@@ -173,5 +175,6 @@ networks:
   functions:
 
 volumes:
+  functions-deps:
   db-data:
   storage-data:
