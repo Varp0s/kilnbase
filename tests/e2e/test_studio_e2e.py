@@ -339,3 +339,12 @@ def test_logs_show_requests_from_core(client, keys):
     assert all(e["level"] in ("error", "critical") for e in errors["entries"])
     bad = httpx.get(f"{STUDIO}/api/logs", params={"service": "../etc/passwd"}, headers=admin(keys))
     assert bad.status_code == 400
+
+
+def test_overview_counts(keys):
+    info = httpx.get(f"{STUDIO}/api/overview", headers=admin(keys)).json()
+    assert info["tables"] >= 1 and info["users"] >= 1 and info["version"].startswith("18")
+    assert isinstance(info["recent_errors"], list) and info["errors_24h"] >= len(
+        info["recent_errors"]
+    )
+    assert httpx.get(f"{STUDIO}/api/overview").status_code == 401

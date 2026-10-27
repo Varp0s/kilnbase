@@ -27,6 +27,9 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   system, consistent tables, badges and forms, and a layout that works on phones. The open page is kept in the
   URL. The UI is built with Vite (still no framework: about 11 KB gzipped); `npm run dev` in `studio/web` serves
   it with live reload against a running Studio.
+- **Studio**: an Overview home page (counts, health checks for tables without RLS, failed webhook deliveries and
+  recent errors), confirmation dialogs and toasts instead of browser prompts, loading placeholders and empty
+  states, a light / dark / system theme switch, and the Inter typeface served by Studio itself.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

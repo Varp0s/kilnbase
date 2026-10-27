@@ -1,4 +1,5 @@
 import "./style.css";
+import { confirmDialog, emptyState, loadFont, skeleton, themeButton, toast } from "./ui";
 
 // Studio UI. Rows written by end users are shown on a page that holds the service_role key, so
 // everything is rendered with textContent / DOM APIs; innerHTML is never used.
@@ -26,7 +27,7 @@ function text(value: Json | undefined): string {
 }
 
 function table(rows: Row[], columns?: string[]): HTMLElement {
-  if (rows.length === 0) return el("p", { className: "hint" }, "No rows.");
+  if (rows.length === 0) return emptyState(icon("table"), "No rows");
   const cols = columns ?? Object.keys(rows[0] ?? {});
   const head = el("tr", {}, ...cols.map((c) => el("th", {}, c)));
   const body = rows.map((r) => el("tr", {}, ...cols.map((c) => el("td", {}, el("code", {}, text(r[c]))))));
@@ -41,6 +42,12 @@ const ICONS: Record<string, string[]> = {
   upload: ["M12 16V4", "M7 9l5-5 5 5", "M5 20h14"],
   refresh: ["M20 11a8 8 0 0 0-14.9-4M4 4v4h4", "M4 13a8 8 0 0 0 14.9 4M20 20v-4h-4"],
   copy: ["M9 9h11v11H9z", "M5 15V5a1 1 0 0 1 1-1h9"],
+  table: ["M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 10h18M9 10v10"],
+  users: ["M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M2 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1", "M16 3.5a4 4 0 0 1 0 8M22 20v-1a5 5 0 0 0-3.5-4.8"],
+  bolt: ["M13 2L4 14h7l-1 8 9-12h-7z"],
+  alert: ["M12 3l10 18H2z", "M12 10v5M12 18h.01"],
+  check: ["M5 12l5 5L20 7"],
+  database: ["M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z", "M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"],
 };
 
 function icon(name: string): SVGSVGElement {
@@ -114,6 +121,11 @@ interface DatabaseInfo {
   version: string; bytes: number; connections: number; max_connections: number; tables: number;
   started_at: string; extensions: Extension[];
 }
+interface Overview {
+  tables: number; tables_without_rls: number; users: number; new_users: number; sessions: number;
+  buckets: number; files: number; file_bytes: number; webhooks: number; failed_deliveries: number;
+  database_bytes: number; version: string; errors_24h: number; recent_errors: Row[];
+}
 interface SqlResult { columns: string[]; rows: Json[][]; truncated: boolean; status: string; committed: boolean }
 
 const PAGE = 50;
@@ -168,14 +180,14 @@ function dataEditor(name: string): HTMLElement {
       if (row !== null && Object.keys(values).length === 0) return void render();
       const key = row === null ? undefined : Object.fromEntries(page.key.map((k) => [k, row[k] ?? null]));
       write(row === null ? "insert" : "update", { key, values })
-        .then(() => render())
+        .then(() => { toast(row === null ? "Row added" : "Row saved"); void render(); })
         .catch((err: unknown) => fail(err, message));
     });
     return form;
   }
 
   async function render(): Promise<void> {
-    box.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+    box.replaceChildren(skeleton());
     try {
       const page = await api<RowsPage>(`/api/tables/${encodeURIComponent(name)}/rows?offset=${offset}&limit=${PAGE}`);
       const editable = page.key.length > 0;
@@ -187,10 +199,10 @@ function dataEditor(name: string): HTMLElement {
         const editBtn = el("button", { type: "button" }, "Edit");
         const delBtn = el("button", { type: "button", className: "danger" }, "Delete");
         editBtn.addEventListener("click", () => box.replaceChildren(el("h3", {}, "Edit row"), rowForm(page, r)));
-        delBtn.addEventListener("click", () => {
-          if (!confirm("Delete this row? This cannot be undone.")) return;
+        delBtn.addEventListener("click", async () => {
+          if (!(await confirmDialog("Delete this row?", "This cannot be undone.", { confirmLabel: "Delete row", danger: true }))) return;
           const key = Object.fromEntries(page.key.map((k) => [k, r[k] ?? null]));
-          write("delete", { key }).then(() => render()).catch((err: unknown) => fail(err, box));
+          write("delete", { key }).then(() => { toast("Row deleted"); void render(); }).catch((err: unknown) => fail(err, box));
         });
         return el("tr", {}, ...cells, el("td", { className: "actions" }, editBtn, delBtn));
       });
@@ -206,7 +218,7 @@ function dataEditor(name: string): HTMLElement {
         editable ? "" : el("p", { className: "hint" }, "No primary key: rows are read-only here."),
         page.rows.length
           ? el("div", { className: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)))
-          : el("p", { className: "hint" }, "No rows."));
+          : emptyState(icon("table"), "No rows yet", editable ? "Add the first one with Add row." : ""));
     } catch (err) {
       fail(err, box);
     }
@@ -229,12 +241,49 @@ function quoteIdent(name: string): string {
 function copyButton(value: string): HTMLButtonElement {
   const b = el("button", { type: "button", className: "small" }, "Copy");
   b.addEventListener("click", () => {
-    void navigator.clipboard.writeText(value).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); });
+    void navigator.clipboard.writeText(value).then(() => toast("Copied to the clipboard"));
   });
   return b;
 }
 
 const views: Record<string, () => Promise<Node[]>> = {
+  async overview() {
+    const o = await api<Overview>("/api/overview");
+    const card = (view: string, ico: string, label: string, value: string, detail: string) => {
+      const b = el("button", { type: "button", className: "card" },
+        el("span", { className: "card-icon" }, icon(ico)),
+        el("small", {}, label), el("strong", {}, value), el("span", { className: "hint" }, detail));
+      b.addEventListener("click", () => void show(view));
+      return b;
+    };
+    const checks: HTMLElement[] = [];
+    const check = (good: boolean, okText: string, badText: string, view: string) => {
+      const b = el("button", { type: "button", className: `check ${good ? "good" : "bad"}` },
+        icon(good ? "check" : "alert"), good ? okText : badText);
+      b.addEventListener("click", () => void show(view));
+      checks.push(b);
+    };
+    check(o.tables_without_rls === 0, "Every table in public has row level security",
+      `${o.tables_without_rls} table(s) without row level security are hidden from the API`, "tables");
+    check(o.failed_deliveries === 0, "No failed webhook deliveries", `${o.failed_deliveries} webhook delivery(s) failed`, "webhooks");
+    check(o.errors_24h === 0, "No errors logged in the last 24 hours", `${o.errors_24h} error(s) logged in the last 24 hours`, "logs");
+    const errors = o.recent_errors.map((e) => el("tr", {},
+      el("td", { className: "nowrap" }, typeof e.ts === "number" ? new Date(e.ts * 1000).toLocaleString() : ""),
+      el("td", {}, el("span", { className: "badge" }, text(e.service))),
+      el("td", { className: "log-msg" }, text(e.msg))));
+    return [
+      el("div", { className: "cards" },
+        card("tables", "table", "Tables", String(o.tables), o.tables_without_rls ? `${o.tables_without_rls} without RLS` : "all protected by RLS"),
+        card("users", "users", "Users", String(o.users), `${o.new_users} new this week · ${o.sessions} active sessions`),
+        card("storage", "folder", "Storage", size(o.file_bytes), `${o.files} file(s) in ${o.buckets} bucket(s)`),
+        card("database", "database", "Database", size(o.database_bytes), `Postgres ${o.version.split(" ")[0]}`),
+        card("webhooks", "bolt", "Webhooks", String(o.webhooks), o.failed_deliveries ? `${o.failed_deliveries} failed deliveries` : "no failures")),
+      el("h2", {}, "Health"),
+      el("div", { className: "checks" }, ...checks),
+      ...(errors.length ? [el("h2", {}, "Recent errors"), el("div", { className: "scroll" }, el("table", {}, el("tbody", {}, ...errors)))] : []),
+    ];
+  },
+
   async tables() {
     const tables = await api<TableInfo[]>("/api/tables");
     return tables.flatMap((t) => [
@@ -308,7 +357,7 @@ const views: Record<string, () => Promise<Node[]>> = {
     function open(bucket: string, prefix: string): void {
       const q = (name: string) => `name=${encodeURIComponent(name)}`;
       const base = `/api/buckets/${encodeURIComponent(bucket)}`;
-      browser.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+      browser.replaceChildren(skeleton());
       api<StoredObject[]>(`${base}/objects?prefix=${encodeURIComponent(prefix)}`).then((items) => {
         // Breadcrumbs: bucket / folder / folder
         const parts = prefix.split("/").filter(Boolean);
@@ -327,7 +376,7 @@ const views: Record<string, () => Promise<Node[]>> = {
           message.textContent = `Uploading ${files.length} file(s)…`;
           Promise.all(files.map((f) => request(`${base}/object?${q(prefix + f.name)}`, {
             method: "POST", body: f, headers: { "Content-Type": f.type || "application/octet-stream" },
-          }))).then(() => open(bucket, prefix)).catch((err: unknown) => fail(err, message));
+          }))).then(() => { toast(`Uploaded ${files.length} file(s)`); open(bucket, prefix); }).catch((err: unknown) => fail(err, message));
         });
 
         const rows = items.map((o) => {
@@ -348,10 +397,10 @@ const views: Record<string, () => Promise<Node[]>> = {
               }).catch((err: unknown) => fail(err, message));
             });
             const del = el("button", { type: "button", className: "danger" }, "Delete");
-            del.addEventListener("click", () => {
-              if (!confirm(`Delete ${prefix + o.name}? This cannot be undone.`)) return;
+            del.addEventListener("click", async () => {
+              if (!(await confirmDialog(`Delete ${o.name}?`, `${bucket}/${prefix + o.name} is removed for good.`, { confirmLabel: "Delete file", danger: true }))) return;
               request(`${base}/object/delete?${q(prefix + o.name)}`, { method: "POST" })
-                .then(() => open(bucket, prefix)).catch((err: unknown) => fail(err, message));
+                .then(() => { toast("File deleted"); open(bucket, prefix); }).catch((err: unknown) => fail(err, message));
             });
             actions.append(dl, del);
           }
@@ -365,7 +414,7 @@ const views: Record<string, () => Promise<Node[]>> = {
             ? el("div", { className: "scroll" }, el("table", {},
                 el("thead", {}, el("tr", {}, ...["name", "type", "size", "updated", ""].map((h) => el("th", {}, h)))),
                 el("tbody", {}, ...rows)))
-            : el("p", { className: "hint" }, "Empty. Upload files to add them here."),
+            : emptyState(icon("folder"), "This folder is empty", "Upload files to add them here."),
           items.length === 500 ? el("p", { className: "hint" }, "Showing the first 500 entries.") : "");
       }).catch((err: unknown) => fail(err, browser));
     }
@@ -397,7 +446,7 @@ const views: Record<string, () => Promise<Node[]>> = {
     return [
       el("p", { className: "hint" }, "Files are read and written as service_role; storage policies apply to API users, not here."),
       create,
-      buckets.length ? list : el("p", { className: "hint" }, "No buckets yet."),
+      buckets.length ? list : emptyState(icon("folder"), "No buckets yet", "Create one above to start storing files."),
       browser,
     ];
   },
@@ -414,10 +463,10 @@ const views: Record<string, () => Promise<Node[]>> = {
         const on = x.installed_version !== null;
         const button = el("button", { type: "button", className: on ? "danger" : "" }, on ? "Disable" : "Enable");
         button.disabled = x.name === "plpgsql";
-        button.addEventListener("click", () => {
-          if (on && !confirm(`Drop extension ${x.name}? Objects that depend on it make this fail; nothing is dropped with it.`)) return;
+        button.addEventListener("click", async () => {
+          if (on && !(await confirmDialog(`Disable ${x.name}?`, "The extension is dropped. If anything depends on it, this fails and nothing changes.", { confirmLabel: "Disable", danger: true }))) return;
           api(`/api/extensions/${encodeURIComponent(x.name)}/${on ? "disable" : "enable"}`, {})
-            .then(() => show("database")).catch((err: unknown) => fail(err, message));
+            .then(() => { toast(`${x.name} ${on ? "disabled" : "enabled"}`); void show("database"); }).catch((err: unknown) => fail(err, message));
         });
         return el("tr", {},
           el("td", {}, el("strong", {}, x.name)),
@@ -519,7 +568,7 @@ const views: Record<string, () => Promise<Node[]>> = {
       el("button", { type: "submit" }, "Show rows"));
     form.addEventListener("submit", (e) => {
       e.preventDefault();
-      result.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+      result.replaceChildren(skeleton());
       api<ViewAsResult>("/api/view-as", { table: tableSelect.value, user_id: userSelect.value || null })
         .then((r) => result.replaceChildren(
           el("p", {}, `Role ${r.role}. `, r.denied
@@ -535,15 +584,16 @@ const views: Record<string, () => Promise<Node[]>> = {
   async users() {
     const result = el("div");
     const search = el("input", { type: "search", placeholder: "email contains…", id: "user-search" });
-    const act = (u: User, action: string, question: string) => {
-      if (!confirm(question)) return;
-      api(`/api/users/${u.id}/${action}`, {}).then(() => load()).catch((err: unknown) => fail(err, result));
+    const act = async (u: User, action: string, question: string) => {
+      const danger = action !== "confirm-email";
+      if (!(await confirmDialog(u.email ?? "Anonymous user", question, { confirmLabel: action === "delete" ? "Delete user" : action === "sign-out" ? "Sign out everywhere" : "Confirm email", danger }))) return;
+      api(`/api/users/${u.id}/${action}`, {}).then(() => { toast("Done"); void load(); }).catch((err: unknown) => fail(err, result));
     };
     const row = (u: User) => {
       const buttons: HTMLButtonElement[] = [];
       const button = (label: string, action: string, question: string, danger = false) => {
         const b = el("button", { type: "button", className: danger ? "danger" : "" }, label);
-        b.addEventListener("click", () => act(u, action, question));
+        b.addEventListener("click", () => void act(u, action, question));
         buttons.push(b);
       };
       if (u.email && !u.email_confirmed_at) button("Confirm email", "confirm-email", `Mark ${u.email} as confirmed?`);
@@ -565,7 +615,7 @@ const views: Record<string, () => Promise<Node[]>> = {
         ? el("div", { className: "scroll" }, el("table", {},
             el("thead", {}, el("tr", {}, ...["email", "status", "last sign-in", "sessions", "created", "id", ""].map((h) => el("th", {}, h)))),
             el("tbody", {}, ...users.map(row))))
-        : el("p", { className: "hint" }, "No users.")))
+        : emptyState(icon("users"), "No users found")))
       .catch((err: unknown) => fail(err, result));
     const form = el("form", {}, el("label", { htmlFor: "user-search" }, "Search"), search, el("button", { type: "submit" }, "Find"));
     form.addEventListener("submit", (e) => { e.preventDefault(); void load(); });
@@ -582,7 +632,7 @@ const views: Record<string, () => Promise<Node[]>> = {
     create.addEventListener("submit", (e) => {
       e.preventDefault();
       api<User>("/api/users", { email: email.value, password: password.value || null, email_confirmed: confirmed.checked })
-        .then(() => { email.value = ""; password.value = ""; message.textContent = "Created."; void load(); })
+        .then(() => { toast(`Created ${email.value}`); email.value = ""; password.value = ""; message.textContent = ""; void load(); })
         .catch((err: unknown) => fail(err, message));
     });
     void load();
@@ -594,9 +644,9 @@ const views: Record<string, () => Promise<Node[]>> = {
       api<Webhook[]>("/api/webhooks"), api<Delivery[]>("/api/webhook-deliveries"), api<TableInfo[]>("/api/tables"),
     ]);
     const message = el("p", { className: "hint" });
-    const act = (path: string, question?: string) => {
-      if (question && !confirm(question)) return;
-      api(path, {}).then(() => show("webhooks")).catch((err: unknown) => fail(err, message));
+    const act = async (path: string, question?: string) => {
+      if (question && !(await confirmDialog("Delete webhook?", question, { confirmLabel: "Delete", danger: true }))) return;
+      api(path, {}).then(() => { toast("Done"); void show("webhooks"); }).catch((err: unknown) => fail(err, message));
     };
 
     const hookRows = hooks.map((w) => {
@@ -653,7 +703,7 @@ const views: Record<string, () => Promise<Node[]>> = {
 
     const grid = (head: string[], rows: HTMLElement[], empty: string) => rows.length
       ? el("div", { className: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, ...head.map((h) => el("th", {}, h)))), el("tbody", {}, ...rows)))
-      : el("p", { className: "hint" }, empty);
+      : emptyState(icon("bolt"), empty);
     return [
       create, secret, message,
       el("h2", {}, "Webhooks"),
@@ -670,6 +720,7 @@ function fail(err: unknown, target: HTMLElement): void {
 }
 
 const SUBTITLES: Record<string, string> = {
+  overview: "This project at a glance.",
   tables: "Which tables the API serves, and the policies that decide who sees which rows.",
   data: "Browse and edit rows.",
   sql: "Run SQL against the database.",
@@ -683,7 +734,7 @@ const SUBTITLES: Record<string, string> = {
 };
 
 async function show(name: string): Promise<void> {
-  if (!(name in views)) name = "tables";
+  if (!(name in views)) name = "overview";
   for (const b of document.querySelectorAll<HTMLButtonElement>("#nav [data-view]")) {
     if (b.dataset.view === name) {
       b.setAttribute("aria-current", "page");
@@ -693,7 +744,7 @@ async function show(name: string): Promise<void> {
   $("page-sub").textContent = SUBTITLES[name] ?? "";
   document.title = `${$("page-title").textContent} · Kilnbase Studio`;
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
-  view.replaceChildren(el("p", { className: "hint" }, "Loading…"));
+  view.replaceChildren(skeleton());
   try {
     view.replaceChildren(...(await views[name]!()));
   } catch (err) {
@@ -704,7 +755,7 @@ async function show(name: string): Promise<void> {
 function signIn(): void {
   $("login-screen").hidden = true;
   $("app").hidden = false;
-  void show(location.hash.slice(1) || "tables");
+  void show(location.hash.slice(1) || "overview");
 }
 
 function signOut(message = ""): void {
@@ -722,7 +773,9 @@ $<HTMLFormElement>("login").addEventListener("submit", (e) => {
   signIn();
 });
 for (const b of document.querySelectorAll<HTMLButtonElement>("#nav [data-view]")) {
-  b.addEventListener("click", () => void show(b.dataset.view ?? "tables"));
+  b.addEventListener("click", () => void show(b.dataset.view ?? "overview"));
 }
 $("signout").addEventListener("click", () => signOut());
+loadFont();
+$("signout").before(themeButton());
 if (sessionStorage.getItem(KEY)) signIn();

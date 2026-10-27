@@ -77,6 +77,7 @@ COMPOSE_PROFILES=studio docker compose up -d   # then open http://127.0.0.1:3001
 Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio listens on `127.0.0.1` only;
 use an SSH tunnel to reach it from another machine.
 
+- **Overview**: counts and health checks (tables without RLS, failed webhook deliveries, recent errors).
 - **Tables & policies**: every `public` table with its RLS state and policies; "Enable RLS" and "Add policy"
   open the SQL editor with a statement to review and run.
 - **Table editor**: browse rows; insert, edit and delete rows of tables with a primary key (as service_role).

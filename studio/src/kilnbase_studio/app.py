@@ -186,6 +186,26 @@ def read_log(path: Path) -> list[dict]:
     return entries
 
 
+OVERVIEW_SQL = """
+select (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind in ('r', 'p')) as tables,
+       (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'public' and c.relkind in ('r', 'p') and not c.relrowsecurity)
+           as tables_without_rls,
+       (select count(*) from auth.users) as users,
+       (select count(*) from auth.users where created_at > now() - interval '7 days') as new_users,
+       (select count(*) from auth.sessions where revoked_at is null) as sessions,
+       (select count(*) from storage.buckets) as buckets,
+       (select count(*) from storage.objects) as files,
+       (select coalesce(sum(size), 0) from storage.objects) as file_bytes,
+       (select count(*) from kilnbase.webhooks) as webhooks,
+       (select count(*) from kilnbase.webhook_deliveries where status = 'failed')
+           as failed_deliveries,
+       pg_database_size(current_database()) as database_bytes,
+       current_setting('server_version') as version
+"""
+
+
 class NewWebhook(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     table: str = Field(min_length=1, max_length=130)
@@ -355,6 +375,21 @@ def create_app(config: Config) -> FastAPI:
     @app.post("/api/buckets/{bucket}/object/delete", dependencies=[Depends(admin)])
     async def delete_object(bucket: str, name: str):
         return relay(await core("DELETE", object_path(bucket, name)))
+
+    @app.get("/api/overview", dependencies=[Depends(admin)])
+    async def overview():
+        info = dict(await app.state.pool.fetchrow(OVERVIEW_SQL))
+        entries = []
+        for path in LOG_FILES.values():
+            entries += await run_in_threadpool(read_log, path)
+        day_ago = time.time() - 86400
+        errors = [
+            e
+            for e in entries
+            if e.get("level") in ("error", "critical") and (e.get("ts") or 0) > day_ago
+        ]
+        errors.sort(key=lambda e: e.get("ts") or 0, reverse=True)
+        return info | {"errors_24h": len(errors), "recent_errors": errors[:5]}
 
     @app.get("/api/connect", dependencies=[Depends(admin)])
     async def connect():
