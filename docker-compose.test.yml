@@ -16,6 +16,9 @@ services:
     environment:
       KILNBASE_AUTH_MFA_REQUIRED: "true"
       KILNBASE_AUTH_ANONYMOUS: "true"
+      # One writer per log file: this second instance logs to stderr only.
+      KILNBASE_LOG_DIR: ""
+    volumes: !reset []
     ports:
       - "9998:9999"
 

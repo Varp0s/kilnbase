@@ -39,6 +39,12 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(dir) = std::env::var_os("KILNBASE_LOG_DIR").filter(|d| !d.is_empty())
+        && let Err(e) = log::init_file(std::path::Path::new(&dir))
+    {
+        // Logging to a file is a convenience for Studio; stderr still works.
+        log_error!("cannot write logs to {}: {e}", dir.to_string_lossy());
+    }
     let cfg = match config::load(|k| std::env::var(k).ok()) {
         Ok(cfg) => cfg,
         Err(e) => {

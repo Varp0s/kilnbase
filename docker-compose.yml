@@ -23,6 +23,7 @@ services:
     image: ghcr.io/varp0s/kilnbase-auth:dev
     restart: unless-stopped
     environment:
+      KILNBASE_LOG_DIR: /logs
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       KILNBASE_JWT_PRIVATE_JWK: ${KILNBASE_JWT_PRIVATE_JWK:?run `kilnbase init` first}
       KILNBASE_AUTHENTICATOR_PASSWORD: ${KILNBASE_AUTHENTICATOR_PASSWORD:?run `kilnbase init` first}
@@ -44,6 +45,8 @@ services:
       KILNBASE_OAUTH_GITHUB_CLIENT_SECRET: ${KILNBASE_OAUTH_GITHUB_CLIENT_SECRET:-}
       KILNBASE_OAUTH_GOOGLE_CLIENT_ID: ${KILNBASE_OAUTH_GOOGLE_CLIENT_ID:-}
       KILNBASE_OAUTH_GOOGLE_CLIENT_SECRET: ${KILNBASE_OAUTH_GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - logs-auth:/logs
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -76,6 +79,7 @@ services:
     image: ghcr.io/varp0s/kilnbase-core:dev
     restart: unless-stopped
     environment:
+      KILNBASE_LOG_DIR: /logs
       KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
       KILNBASE_DATABASE_URL: postgres://authenticator:${KILNBASE_AUTHENTICATOR_PASSWORD}@db:5432/postgres
       KILNBASE_STORAGE_SIGNING_KEY: ${KILNBASE_STORAGE_SIGNING_KEY:?run `kilnbase init` first}
@@ -94,6 +98,8 @@ services:
       KILNBASE_S3_REGION: ${KILNBASE_S3_REGION:-us-east-1}
     volumes:
       - storage-data:/data
+      # Its own log volume, read by Studio; stderr keeps the full stream for `docker compose logs`.
+      - logs-core:/logs
     ports:
       - "8000:8000"
     networks: [default, images, functions]
@@ -132,12 +138,14 @@ services:
     image: ghcr.io/varp0s/kilnbase-functions:dev
     restart: unless-stopped
     environment:
+      KILNBASE_LOG_DIR: /logs
       KILNBASE_JWKS: ${KILNBASE_JWKS:?run `kilnbase init` first}
       KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
     volumes:
       - ./functions:/functions:ro
       # Packages from functions/requirements.txt, installed (wheels only) when the service starts.
       - functions-deps:/deps
+      - logs-functions:/logs
     networks: [functions]
     read_only: true
     tmpfs: [/tmp]
@@ -164,10 +172,17 @@ services:
     image: ghcr.io/varp0s/kilnbase-studio:dev
     restart: unless-stopped
     environment:
+      KILNBASE_LOG_DIR: /logs/studio
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       KILNBASE_SERVICE_ROLE_KEY: ${KILNBASE_SERVICE_ROLE_KEY:?run `kilnbase init` first}
       KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
       KILNBASE_PUBLIC_URL: ${KILNBASE_PUBLIC_URL:-http://localhost:8000}
+    volumes:
+      # Each service's own log volume, read-only here; Studio writes only its own.
+      - logs-studio:/logs/studio
+      - logs-core:/logs/core:ro
+      - logs-auth:/logs/auth:ro
+      - logs-functions:/logs/functions:ro
     ports:
       - "127.0.0.1:3001:3001"
     read_only: true
@@ -204,6 +219,10 @@ networks:
 
 volumes:
   functions-deps:
+  logs-core:
+  logs-auth:
+  logs-functions:
+  logs-studio:
   db-data:
   db-backups:
   storage-data:

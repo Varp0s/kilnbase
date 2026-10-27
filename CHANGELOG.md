@@ -19,6 +19,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   schema where they allow it.
 - **Studio**: Connect page (API URL, anon key, client snippets) and "Enable RLS" / "Add policy" shortcuts that
   open the SQL editor with a statement to review.
+- **Logs**: core, auth, functions and Studio also write their JSON log lines to a per-service volume (10 MB,
+  one rotation); Studio reads them read-only. Postgres, PostgREST and imgproxy still log to stderr only.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

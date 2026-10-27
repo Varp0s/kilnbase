@@ -91,7 +91,9 @@ use an SSH tunnel to reach it from another machine.
 - **Webhooks**: create (the signing secret is shown once), enable, disable and delete webhooks; the newest
   deliveries with status and last error, and a retry for failed ones.
 
-Log viewing is not there yet.
+- **Logs**: the JSON log lines of core, auth, functions and Studio, filtered by service, level and text. Each
+  service writes to its own volume (10 MB, one rotation) and Studio mounts them read-only; Postgres, PostgREST
+  and imgproxy log to stderr only (`docker compose logs`).
 
 ### Security check
 

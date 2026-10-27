@@ -1,16 +1,15 @@
 import logging.config
 import os
 import sys
-from copy import deepcopy
 
 import uvicorn
-from kilnbase_auth.log import CONFIG, log
+from kilnbase_auth.log import config as log_config
+from kilnbase_auth.log import log
 
 from .app import create_app
 from .config import ConfigError, load
 
-LOG_CONFIG = deepcopy(CONFIG)
-LOG_CONFIG["formatters"]["json"]["service"] = "studio"
+LOG_CONFIG = log_config("studio")
 
 
 def main() -> None:

@@ -1,3 +1,4 @@
+import time
 import uuid
 
 import httpx2 as httpx
@@ -319,3 +320,22 @@ def test_database_overview_and_extensions(keys):
 def test_connect_page_shows_only_public_values(keys):
     info = httpx.get(f"{STUDIO}/api/connect", headers=admin(keys)).json()
     assert info == {"url": "http://localhost:8000", "anon_key": keys.anon}
+
+
+def test_logs_show_requests_from_core(client, keys):
+    marker = f"/rest/v1/logs-probe-{uuid.uuid4().hex[:8]}"
+    client.get(marker, headers={"apikey": keys.anon})
+    for _ in range(50):
+        r = httpx.get(
+            f"{STUDIO}/api/logs", params={"service": "core", "q": marker}, headers=admin(keys)
+        )
+        if r.json()["entries"]:
+            break
+        time.sleep(0.2)
+    entry = r.json()["entries"][0]
+    assert entry["service"] == "core" and entry["path"] == marker and "core" in r.json()["services"]
+
+    errors = httpx.get(f"{STUDIO}/api/logs", params={"level": "error"}, headers=admin(keys)).json()
+    assert all(e["level"] in ("error", "critical") for e in errors["entries"])
+    bad = httpx.get(f"{STUDIO}/api/logs", params={"service": "../etc/passwd"}, headers=admin(keys))
+    assert bad.status_code == 400

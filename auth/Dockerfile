@@ -10,7 +10,8 @@ COPY cli/pyproject.toml ./cli/pyproject.toml
 COPY functions-runner/pyproject.toml ./functions-runner/pyproject.toml
 COPY studio/pyproject.toml ./studio/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-auth \
-    && useradd --system --uid 10001 kilnbase
+    && useradd --system --uid 10001 kilnbase \
+    && mkdir /logs && chown kilnbase /logs
 USER kilnbase
 EXPOSE 9999
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "kilnbase_auth"]

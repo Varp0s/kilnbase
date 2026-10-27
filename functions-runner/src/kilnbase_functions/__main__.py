@@ -3,19 +3,18 @@ import os
 import subprocess
 import sys
 import tempfile
-from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
-from kilnbase_auth.log import CONFIG, log
+from kilnbase_auth.log import config as log_config
+from kilnbase_auth.log import log
 
 from . import deps, jail
 from .app import create_app
 from .config import ConfigError, load
 
-LOG_CONFIG = deepcopy(CONFIG)
-LOG_CONFIG["formatters"]["json"]["service"] = "functions"
+LOG_CONFIG = log_config("functions")
 
 
 def jail_works(config) -> str | None:

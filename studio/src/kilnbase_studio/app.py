@@ -159,6 +159,33 @@ select a.name, a.default_version, a.installed_version, a.comment, n.nspname as s
 """
 
 
+LOG_DIR = Path("/logs")
+# Fixed names only: a path is never built from the request.
+LOG_FILES = {s: LOG_DIR / s / f"{s}.log" for s in ("core", "auth", "functions", "studio")}
+LOG_TAIL_BYTES = 2 * 1024 * 1024
+LEVELS = ("debug", "info", "warning", "error", "critical")
+
+
+def read_log(path: Path) -> list[dict]:
+    """The last LOG_TAIL_BYTES of the rotated and the current file, oldest first."""
+    entries = []
+    for file in (path.with_name(path.name + ".1"), path):
+        try:
+            with file.open("rb") as f:
+                f.seek(max(0, f.seek(0, 2) - LOG_TAIL_BYTES))
+                data = f.read()
+        except OSError:
+            continue
+        for raw in data.splitlines():
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue  # a line cut by the tail offset, or one written mid-rotation
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
+
+
 class NewWebhook(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     table: str = Field(min_length=1, max_length=130)
@@ -332,6 +359,30 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/connect", dependencies=[Depends(admin)])
     async def connect():
         return {"url": config.public_url, "anon_key": config.anon_key}
+
+    @app.get("/api/logs", dependencies=[Depends(admin)])
+    async def logs(service: str = "", level: str = "", q: str = "", limit: int = 200):
+        if service and service not in LOG_FILES:
+            return error(400, "invalid_request", f"service is one of {', '.join(LOG_FILES)}")
+        if level and level not in LEVELS:
+            return error(400, "invalid_request", f"level is one of {', '.join(LEVELS)}")
+        limit = max(1, min(limit, 1000))
+        names = [service] if service else list(LOG_FILES)
+        entries = []
+        for name in names:
+            entries += await run_in_threadpool(read_log, LOG_FILES[name])
+        floor = LEVELS.index(level) if level else 0
+        needle = q.lower()[:200]
+        picked = [
+            e
+            for e in entries
+            if e.get("level") in LEVELS
+            if LEVELS.index(e["level"]) >= floor
+            if not needle or needle in json.dumps(e).lower()
+        ]
+        picked.sort(key=lambda e: e.get("ts") or 0, reverse=True)
+        available = [n for n, p in LOG_FILES.items() if p.exists()]
+        return {"entries": picked[:limit], "services": available}
 
     @app.get("/api/database", dependencies=[Depends(admin)])
     async def database():
