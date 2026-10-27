@@ -52,7 +52,8 @@ The container runs under Docker's default seccomp profile plus the namespace sys
 again for the function. Docker's AppArmor profile forbids the mounts nsjail needs, so it is turned off for this
 container only (`apparmor=unconfined`). Ubuntu 23.10 and later also forbid user namespaces to such processes; allow
 them with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (persist it in `/etc/sysctl.d/`).
-Without these the service refuses to start and says so.
+Without these the service refuses to start, or on some kernels starts and then fails every call with
+`Launching child process failed` in its log.
 
 ### GraphQL (optional)
 
