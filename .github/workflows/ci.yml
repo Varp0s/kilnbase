@@ -72,7 +72,20 @@ jobs:
       - name: a function runs in its sandbox
         run: |
           set -a; . ./.env; set +a
-          curl -fsS localhost:8000/functions/v1/whoami -H "apikey: $KILNBASE_ANON_KEY"             || { docker compose -f docker-compose.yml -f docker-compose.test.yml logs functions; exit 1; }
+          debug() {
+            docker compose -f docker-compose.yml -f docker-compose.test.yml exec -T functions sh -c '
+              ls -lan /functions /functions/whoami; cat /proc/self/mountinfo | grep -E "functions|deps| /tmp"
+              cd /app && .venv/bin/python -c "
+          import os, sys
+          from pathlib import Path
+          from kilnbase_functions import jail
+          from kilnbase_functions.config import load
+          c = load(os.environ)
+          a = [x for x in jail.argv(c, Path(\"/functions/whoami\"), 1) if x != \"-Q\"]
+          os.execvp(a[0], a[:1] + [\"-v\"] + a[1:])
+          " </dev/null' 2>&1 | tail -60
+          }
+          curl -fsS localhost:8000/functions/v1/whoami -H "apikey: $KILNBASE_ANON_KEY"             || { docker compose -f docker-compose.yml -f docker-compose.test.yml logs functions; debug; exit 1; }
       # Before the e2e suite: test_gen_types_db type-checks generated output with the SDK's tsc.
       - uses: actions/setup-node@v7.1.0
         with:
