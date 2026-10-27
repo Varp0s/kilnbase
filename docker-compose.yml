@@ -167,6 +167,7 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       KILNBASE_SERVICE_ROLE_KEY: ${KILNBASE_SERVICE_ROLE_KEY:?run `kilnbase init` first}
       KILNBASE_ANON_KEY: ${KILNBASE_ANON_KEY:?run `kilnbase init` first}
+      KILNBASE_PUBLIC_URL: ${KILNBASE_PUBLIC_URL:-http://localhost:8000}
     ports:
       - "127.0.0.1:3001:3001"
     read_only: true

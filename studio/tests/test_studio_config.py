@@ -18,6 +18,9 @@ def test_loads_and_keeps_the_anon_claims():
     config = load(ENV)
     assert config.anon_claims == {"role": "anon", "iss": "kilnbase"}
     assert config.port == 3001
+    assert (
+        config.anon_key == ENV["KILNBASE_ANON_KEY"] and config.public_url == "http://localhost:8000"
+    )
 
 
 @pytest.mark.parametrize(

@@ -329,6 +329,10 @@ def create_app(config: Config) -> FastAPI:
     async def delete_object(bucket: str, name: str):
         return relay(await core("DELETE", object_path(bucket, name)))
 
+    @app.get("/api/connect", dependencies=[Depends(admin)])
+    async def connect():
+        return {"url": config.public_url, "anon_key": config.anon_key}
+
     @app.get("/api/database", dependencies=[Depends(admin)])
     async def database():
         async with app.state.pool.acquire() as conn:

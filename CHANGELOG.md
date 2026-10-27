@@ -17,6 +17,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   is shown, since chat webhooks carry their secret in the path.
 - **Studio**: database overview (version, size, connections) and extensions, enabled into the `extensions`
   schema where they allow it.
+- **Studio**: Connect page (API URL, anon key, client snippets) and "Enable RLS" / "Add policy" shortcuts that
+  open the SQL editor with a statement to review.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

@@ -193,12 +193,38 @@ function dataEditor(name: string): HTMLElement {
   return box;
 }
 
+/** Opens the SQL editor with `sql` filled in; nothing runs until the admin presses Run. */
+function draftSql(sql: string): void {
+  sessionStorage.setItem("kilnbase-studio-sql", sql);
+  void show("sql");
+}
+
+function quoteIdent(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+function copyButton(value: string): HTMLButtonElement {
+  const b = el("button", { type: "button", className: "small" }, "Copy");
+  b.addEventListener("click", () => {
+    void navigator.clipboard.writeText(value).then(() => { b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); });
+  });
+  return b;
+}
+
 const views: Record<string, () => Promise<Node[]>> = {
   async tables() {
     const tables = await api<TableInfo[]>("/api/tables");
     return tables.flatMap((t) => [
       el("h2", {}, `public.${t.name} `,
-        el("span", { className: t.rls ? "ok" : "error" }, t.rls ? "RLS on" : "RLS off: hidden from the API")),
+        el("span", { className: t.rls ? "ok" : "error" }, t.rls ? "RLS on" : "RLS off: hidden from the API"), " ",
+        (() => {
+          const table = `public.${quoteIdent(t.name)}`;
+          const b = el("button", { type: "button", className: "small" }, t.rls ? "Add policy" : "Enable RLS");
+          b.addEventListener("click", () => draftSql(t.rls
+            ? `-- Who may see or change which rows. Review, then Run.\ncreate policy "own rows" on ${table}\n  for all to authenticated\n  using (owner = auth.uid())\n  with check (owner = auth.uid());\n`
+            : `-- With RLS on, the table appears in the API; add policies to decide who sees which rows.\nalter table ${table} enable row level security;\n`));
+          return b;
+        })()),
       t.policies.length
         ? table(t.policies.map((p) => ({ ...p, roles: p.roles.join(", ") })), ["name", "command", "roles", "using", "check"])
         : el("p", { className: "hint" }, t.rls ? "No policies: nobody can read it through the API." : ""),
@@ -391,6 +417,22 @@ const views: Record<string, () => Promise<Node[]>> = {
       message,
       el("div", { className: "scroll" }, el("table", {},
         el("thead", {}, el("tr", {}, ...["name", "version", "description", ""].map((h) => el("th", {}, h)))), body)),
+    ];
+  },
+
+  async connect() {
+    const info = await api<{ url: string; anon_key: string }>("/api/connect");
+    const field = (label: string, value: string) => el("div", { className: "toolbar" },
+      el("strong", {}, label), el("code", { className: "secretish" }, value), copyButton(value));
+    const js = `import { createClient } from "kilnbase";\n\nconst kb = createClient("${info.url}", "${info.anon_key}");\nconst { data, error } = await kb.from("todos").select();`;
+    const py = `from kilnbase import create_client\n\nkb = create_client("${info.url}", "${info.anon_key}")\nrows = kb.from_("todos").select().execute()`;
+    const curl = `curl "${info.url}/rest/v1/todos?select=*" -H "apikey: ${info.anon_key}"`;
+    return [
+      el("p", { className: "hint" }, "The anon key is meant for browsers and apps; row level security decides what it can reach. Never ship the service_role key."),
+      field("API URL", info.url),
+      field("anon key", info.anon_key),
+      ...[["JavaScript", js], ["Python", py], ["curl", curl]].flatMap(([title, code]) => [
+        el("h2", {}, title!, " ", copyButton(code!)), el("pre", { className: "code" }, code!)]),
     ];
   },
 

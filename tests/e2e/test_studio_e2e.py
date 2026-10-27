@@ -314,3 +314,8 @@ def test_database_overview_and_extensions(keys):
         assert act("citext", "disable").status_code == 200
     assert act("no_such_ext", "enable").status_code == 404
     assert act("citext", "upgrade").status_code == 400
+
+
+def test_connect_page_shows_only_public_values(keys):
+    info = httpx.get(f"{STUDIO}/api/connect", headers=admin(keys)).json()
+    assert info == {"url": "http://localhost:8000", "anon_key": keys.anon}

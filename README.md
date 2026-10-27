@@ -76,7 +76,8 @@ COMPOSE_PROFILES=studio docker compose up -d   # then open http://127.0.0.1:3001
 Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio listens on `127.0.0.1` only;
 use an SSH tunnel to reach it from another machine.
 
-- **Tables & policies**: every `public` table with its RLS state and policies.
+- **Tables & policies**: every `public` table with its RLS state and policies; "Enable RLS" and "Add policy"
+  open the SQL editor with a statement to review and run.
 - **Table editor**: browse rows; insert, edit and delete rows of tables with a primary key (as service_role).
 - **SQL**: run SQL as the database superuser in one transaction, optionally rolled back afterwards. Schema
   changes made here are not recorded in `db/migrations`; use `kilnbase migrate new` for ones you keep.
@@ -85,6 +86,7 @@ use an SSH tunnel to reach it from another machine.
 - **View as user**: runs a query with that user's role and the claims their access token carries, so you see
   exactly the rows the REST API returns to them, without signing in as them (rolled back, nothing is written).
 - **Users**: search, create, confirm email, end all sessions, delete.
+- **Connect**: the API URL, the anon key and client snippets.
 - **Webhooks**: create (the signing secret is shown once), enable, disable and delete webhooks; the newest
   deliveries with status and last error, and a retry for failed ones.
 

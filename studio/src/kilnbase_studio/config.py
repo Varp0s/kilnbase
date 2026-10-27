@@ -19,6 +19,9 @@ class Config:
     port: int = 3001
     # Stored files are read and written through core, which owns the storage backend.
     core_url: str = "http://core:8000"
+    # Shown on the Connect page; the anon key is public by design.
+    public_url: str = "http://localhost:8000"
+    anon_key: str = ""
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -50,4 +53,6 @@ def load(env: Mapping[str, str]) -> Config:
         claims["KILNBASE_ANON_KEY"],
         int(port),
         env.get("KILNBASE_STUDIO_CORE_URL", "http://core:8000").rstrip("/"),
+        env.get("KILNBASE_PUBLIC_URL", "http://localhost:8000").rstrip("/"),
+        values["KILNBASE_ANON_KEY"],
     )
