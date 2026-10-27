@@ -67,6 +67,22 @@ database once the dump has restored cleanly into a scratch copy. The archive hol
 data, so treat it like a secret; it does not contain `.env`, which you must keep separately (without the same
 keys, restored sessions and API keys are invalid). Only the local storage volume is included.
 
+### Upgrading
+
+```sh
+git pull                    # or check out a release
+uv run kilnbase upgrade
+```
+
+`upgrade` tags the images that are running now, pulls and builds the new version while the old one keeps
+serving, stops `core` (the only entry point, so nothing is written after the backup), writes
+`kilnbase-pre-upgrade-<time>.tar`, and starts the new version, which applies its migrations. If anything fails —
+a migration, a service that does not become healthy — it restores the data from that backup and starts the
+previous images again (tagged `kilnbase-rollback/<service>:<time>`). The stack then runs from
+`kilnbase-rollback.json`, an extra compose file that pins those images; the command to start it is printed, and
+the next successful `upgrade` removes it. The backup is always kept. Expect downtime for as long as the backup
+and the start of the new version take.
+
 ### TypeScript types
 
 ```sh

@@ -61,6 +61,10 @@ def docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=True, stderr=subprocess.PIPE, **kwargs)  # noqa: S603
 
 
+def compose_args(project: str, files: list[str]) -> list[str]:
+    return ["compose", "-p", project, *(a for f in files for a in ("-f", f))]
+
+
 class Stack:
     """The running compose project: its db container, storage volume and a helper image."""
 
@@ -81,6 +85,17 @@ class Stack:
     def storage(self, script: str, read_only: bool, **kwargs) -> subprocess.CompletedProcess:
         mount = f"{self.volume}:/data" + (":ro" if read_only else "")
         return docker("run", "--rm", "-i", "-v", mount, self.image, "sh", "-ec", script, **kwargs)
+
+    def containers(self) -> list[tuple[str, str, list[str]]]:
+        """(service, image ID, compose files) of each running container; IDs, since tags move."""
+        labels = "{{index .Config.Labels %s}}"
+        service = labels % '"com.docker.compose.service"'
+        files = labels % '"com.docker.compose.project.config_files"'
+        label = f"label=com.docker.compose.project={self.project}"
+        ids = docker("ps", "-q", "--filter", label, text=True).stdout.split()
+        out = docker("inspect", "-f", f"{service}|{{{{.Image}}}}|{files}", *ids, text=True).stdout
+        rows = (line.split("|") for line in out.splitlines() if line.strip())
+        return [(svc, image, paths.split(",")) for svc, image, paths in rows]
 
     def services(self) -> list[str]:
         """Running containers of the project other than the database."""
@@ -166,26 +181,12 @@ def restore(env_file: Path, path: Path, yes: bool) -> int:
             if not yes and not confirm(manifest):
                 print("restore: cancelled", file=sys.stderr)
                 return 1
-            # Members are read by name only, never extracted by their own paths.
-            dump, objects = Path(tmp, "db.dump"), Path(tmp, "storage.tar")
-            for name, target in (("db.dump", dump), ("storage.tar", objects)):
-                with target.open("wb") as f:
-                    shutil.copyfileobj(tar.extractfile(name), f)
-            docker("cp", str(dump), f"{stack.db}:{DUMP_IN_DB}")
-            docker("exec", stack.db, "pg_restore", "--list", DUMP_IN_DB)  # readable before we stop
+            objects = stage(stack, tar, Path(tmp))
             stopped = stack.services()
             if stopped:
                 docker("stop", *stopped)
             try:
-                restore_db(stack)
-                with objects.open("rb") as f:
-                    stack.storage(
-                        # Unpacked aside first, so a broken archive leaves the current files alone.
-                        f"cd /data && rm -rf .restore && mkdir .restore && tar -C .restore -xf -"
-                        f" && rm -rf {' '.join(STORAGE_DIRS)} && mv .restore/* . && rmdir .restore",
-                        read_only=False,
-                        stdin=f,
-                    )
+                replace_data(stack, objects)
             finally:
                 if stopped:
                     docker("start", *stopped)
@@ -194,6 +195,31 @@ def restore(env_file: Path, path: Path, yes: bool) -> int:
             return 1
     print(f"Restored the backup from {manifest['created_at']}.")
     return 0
+
+
+def stage(stack: Stack, tar: tarfile.TarFile, tmp: Path) -> Path:
+    """Copies the dump into the db container and checks it; returns the storage archive."""
+    # Members are read by name only, never extracted by their own paths.
+    dump, objects = tmp / "db.dump", tmp / "storage.tar"
+    for name, target in (("db.dump", dump), ("storage.tar", objects)):
+        with target.open("wb") as f:
+            shutil.copyfileobj(tar.extractfile(name), f)
+    docker("cp", str(dump), f"{stack.db}:{DUMP_IN_DB}")
+    docker("exec", stack.db, "pg_restore", "--list", DUMP_IN_DB)  # readable before we stop
+    return objects
+
+
+def replace_data(stack: Stack, objects: Path) -> None:
+    """Swaps in the staged database and stored files; the other services must be stopped."""
+    restore_db(stack)
+    with objects.open("rb") as f:
+        stack.storage(
+            # Unpacked aside first, so a broken archive leaves the current files alone.
+            f"cd /data && rm -rf .restore && mkdir .restore && tar -C .restore -xf -"
+            f" && rm -rf {' '.join(STORAGE_DIRS)} && mv .restore/* . && rmdir .restore",
+            read_only=False,
+            stdin=f,
+        )
 
 
 def restore_db(stack: Stack) -> None:

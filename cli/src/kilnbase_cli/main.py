@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import backup, doctor, gen_types, init, migrate, rotate_keys
+from . import backup, doctor, gen_types, init, migrate, rotate_keys, upgrade
 
 
 def main() -> None:
@@ -55,6 +55,11 @@ def main() -> None:
     )
     migrate_new.add_argument("name")
 
+    upgrade_cmd = commands.add_parser(
+        "upgrade", help="back up, start the new version, roll back automatically if it fails"
+    )
+    upgrade_cmd.add_argument("--env-file", type=Path, default=Path(".env"))
+
     args = parser.parse_args()
     if args.command == "init":
         sys.exit(init.run(args.env_file, args.force))
@@ -70,6 +75,8 @@ def main() -> None:
         sys.exit(migrate.new(args.dir, args.name))
     if args.command == "migrate":
         sys.exit(migrate.run(args.env_file, args.dir))
+    if args.command == "upgrade":
+        sys.exit(upgrade.run(args.env_file))
     if args.command == "restore":
         sys.exit(backup.restore(args.env_file, args.file, args.yes))
 
