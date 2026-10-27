@@ -5,7 +5,9 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 
 ## [Unreleased]
 
-First release candidate (planned as 0.1.0).
+## [0.8.0] - 2026-10-27
+
+First tagged release.
 
 ### Added
 - **Stack**: Postgres 18, PostgREST, a Rust gateway (`core`) and a Python auth service, started with
@@ -82,8 +84,7 @@ First release candidate (planned as 0.1.0).
   request log without query strings, so tokens in links never reach the logs.
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
 - **Migrations** are checksummed; edited or unknown applied migrations stop the auth service.
-- **Release gate** that keeps third-party platform code and dependencies out of shipped artifacts;
-  multi-arch GHCR images with SBOM, provenance and cosign signatures.
+- Multi-arch GHCR images with SBOM and provenance attestations.
 - Example todo app, k6 benchmark (`docs/benchmarks.md`).
 
 ### Known limitations
