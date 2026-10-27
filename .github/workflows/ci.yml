@@ -91,4 +91,4 @@ jobs:
             fi
           done
       - if: failure()
-        run: docker compose logs
+        run: docker compose -f docker-compose.yml -f docker-compose.test.yml logs
