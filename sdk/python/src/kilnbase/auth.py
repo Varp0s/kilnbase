@@ -1,7 +1,9 @@
 import base64
 import hashlib
 import secrets
+import threading
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -24,9 +26,23 @@ class AuthClient:
         self._http = http
         self._url = url
         self._api_key = api_key
-        self.session: dict[str, Any] | None = None
+        self._session: dict[str, Any] | None = None
+        # Realtime runs on its own thread: two refreshes at once would replay a single-use
+        # refresh token and end the session.
+        self._refresh_lock = threading.Lock()
+        self._listeners: list[Callable[[], None]] = []
         self._verifier: str | None = None
         self.mfa = MfaClient(self)
+
+    @property
+    def session(self) -> dict[str, Any] | None:
+        return self._session
+
+    @session.setter
+    def session(self, value: dict[str, Any] | None) -> None:
+        self._session = value
+        for listener in self._listeners:
+            listener()
 
     def sign_up(self, email: str, password: str) -> dict[str, Any]:
         return self._obtain("/auth/v1/signup", {"email": email, "password": password})
@@ -131,9 +147,10 @@ class AuthClient:
 
     def get_session(self) -> dict[str, Any] | None:
         """The current session, refreshed first if it is about to expire."""
-        if self.session and self.session["expires_at"] - REFRESH_MARGIN <= time.time():
-            return self.refresh_session()
-        return self.session
+        with self._refresh_lock:
+            if self.session and self.session["expires_at"] - REFRESH_MARGIN <= time.time():
+                return self.refresh_session()
+            return self.session
 
     def get_user(self) -> dict[str, Any]:
         if not self.get_session():

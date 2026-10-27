@@ -1,12 +1,13 @@
 [project]
 name = "kilnbase-client"
 version = "0.0.0"
-description = "Python client for Kilnbase: auth, REST queries and storage"
+description = "Python client for Kilnbase: auth, REST queries, storage and realtime"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.15"
 dependencies = [
     "httpx2==2.16.0",
+    "websockets==17.3",
 ]
 
 [build-system]

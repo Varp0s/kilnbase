@@ -54,7 +54,8 @@ First release candidate (planned as 0.1.0).
   before the upgrade are revoked. `KILNBASE_AUTH_MFA_REQUIRED=true` makes a second factor mandatory for every
   non-guest user.
 - **Python SDK** (`sdk/python`): sync client with the same auth (passwordless, OAuth, MFA, anonymous), query and
-  storage features as the JS client, including image transforms; realtime is not included yet.
+  storage features as the JS client, including image transforms, and realtime (table changes with resume,
+  broadcast and presence) on a background thread that reconnects as the current user after sign-in/out.
 - **CLI**: `kilnbase init` (keys and secrets) and `kilnbase doctor` (secret and database security audit).
 - **CORS**: any origin by default (header-based auth, no cookies) or an explicit allow-list.
 - **Migrations** are checksummed; edited or unknown applied migrations stop the auth service.

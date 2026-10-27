@@ -1,6 +1,8 @@
 """The Python SDK driven against the running stack."""
 
+import queue
 import re
+import secrets
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
@@ -28,6 +30,7 @@ create table public.e2e_sdk_items (
 alter table public.e2e_sdk_items enable row level security;
 create policy own_rows on public.e2e_sdk_items for all to authenticated
     using (owner = auth.uid()) with check (owner = auth.uid());
+select kilnbase.enable_realtime('public.e2e_sdk_items');
 notify pgrst, 'reload schema';
 
 delete from storage.objects where bucket_id like 'e2e-sdk-%';
@@ -261,3 +264,47 @@ def test_public_url_and_image_transforms(client, user):
     r = client.get(pub.get_public_url(path, transform=t))
     assert r.status_code == 200, r.text
     assert png_size(r.content) == (10, 5)
+
+
+def test_realtime_follows_rls_and_the_session(client, keys, kb):
+    other = create_client(BASE_URL, keys.anon)
+    events = {}
+    for c in (kb, other):
+        c.auth.sign_up(email(), PASSWORD)
+        events[c] = queue.Queue()
+        c.realtime.subscribe("e2e_sdk_items", events[c].put)
+
+    def insert(c):
+        row_id = secrets.randbelow(10**9) + 1000
+        c.from_("e2e_sdk_items").insert({"id": row_id, "name": "rt"}).execute()
+        return row_id
+
+    def wait_for(c, row_id, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                e = events[c].get(timeout=left)
+            except queue.Empty:
+                break
+            if e.get("record", {}).get("id") == row_id:
+                return e
+        return None
+
+    # There is no "subscribed" callback: insert until each client sees its own row.
+    for c in (kb, other):
+        assert any(wait_for(c, insert(c), 0.5) for _ in range(20)), "never subscribed"
+
+    mine = insert(kb)
+    assert wait_for(kb, mine)["op"] == "INSERT"
+    assert wait_for(other, mine, 1.5) is None
+
+    # After sign-out the socket reconnects as anon and stops receiving the user's rows.
+    owner = kb.auth.get_user()["id"]
+    kb.auth.sign_out()
+    time.sleep(1)
+    row_id = secrets.randbelow(10**9) + 1000
+    row = {"id": row_id, "owner": owner, "name": "x"}
+    r = client.post("/rest/v1/e2e_sdk_items", headers={"apikey": keys.service_role}, json=row)
+    assert r.status_code == 201, r.text
+    assert wait_for(kb, row_id, 1.5) is None
+    other.close()

@@ -1,6 +1,7 @@
 import httpx2 as httpx
 
 from .auth import AuthClient
+from .realtime import RealtimeClient
 from .rest import Query
 from .storage import StorageClient
 
@@ -12,12 +13,14 @@ class Client:
         self._url = url
         self.auth = AuthClient(http, url, api_key)
         self.storage = StorageClient(http, url, self.auth.headers)
+        self.realtime = RealtimeClient(url, api_key, self.auth)
 
     def from_(self, table: str) -> Query:
         """Query a table in the `public` schema."""
         return Query(self._http, self._url, table, self.auth.headers)
 
     def close(self) -> None:
+        self.realtime.close()
         self._http.close()
 
 
