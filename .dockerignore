@@ -9,8 +9,12 @@
 !functions-runner/pyproject.toml
 !functions-runner/src/
 !studio/src/
-!studio/web/app.ts
+!studio/web/src/
+!studio/web/index.html
+!studio/web/vite.config.ts
 !studio/web/package.json
 !studio/web/package-lock.json
 !studio/web/tsconfig.json
 **/__pycache__
+# Built inside the image; a local build must not leak in.
+studio/src/kilnbase_studio/web/

@@ -1,3 +1,5 @@
+import "./style.css";
+
 // Studio UI. Rows written by end users are shown on a page that holds the service_role key, so
 // everything is rendered with textContent / DOM APIs; innerHTML is never used.
 
@@ -32,6 +34,27 @@ function table(rows: Row[], columns?: string[]): HTMLElement {
 }
 
 class SignedOut extends Error {}
+
+const ICONS: Record<string, string[]> = {
+  folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  file: ["M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z", "M14 3v5h5"],
+  upload: ["M12 16V4", "M7 9l5-5 5 5", "M5 20h14"],
+  refresh: ["M20 11a8 8 0 0 0-14.9-4M4 4v4h4", "M4 13a8 8 0 0 0 14.9 4M20 20v-4h-4"],
+  copy: ["M9 9h11v11H9z", "M5 15V5a1 1 0 0 1 1-1h9"],
+};
+
+function icon(name: string): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  for (const d of ICONS[name] ?? []) {
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", d);
+    svg.append(path);
+  }
+  return svg;
+}
 
 /** Raw requests for file bodies; same key handling as api(). */
 async function request(path: string, init: RequestInit = {}): Promise<Response> {
@@ -289,12 +312,12 @@ const views: Record<string, () => Promise<Node[]>> = {
       api<StoredObject[]>(`${base}/objects?prefix=${encodeURIComponent(prefix)}`).then((items) => {
         // Breadcrumbs: bucket / folder / folder
         const parts = prefix.split("/").filter(Boolean);
-        const crumbs = [el("button", { type: "button", className: "link" }, bucket)];
+        const crumbs: HTMLElement[] = [el("button", { type: "button", className: "link" }, bucket)];
         crumbs[0]!.addEventListener("click", () => open(bucket, ""));
         parts.forEach((p, i) => {
           const b = el("button", { type: "button", className: "link" }, p);
           b.addEventListener("click", () => open(bucket, parts.slice(0, i + 1).join("/") + "/"));
-          crumbs.push(el("span", {}, " / ") as unknown as HTMLButtonElement, b);
+          crumbs.push(el("span", { className: "sep" }, "/"), b);
         });
 
         const file = el("input", { type: "file", id: "upload", multiple: true });
@@ -311,11 +334,11 @@ const views: Record<string, () => Promise<Node[]>> = {
           const name = el("td", {});
           const actions = el("td", { className: "actions" });
           if (o.folder) {
-            const b = el("button", { type: "button", className: "link" }, `📁 ${o.name}`);
+            const b = el("button", { type: "button", className: "link folder" }, icon("folder"), o.name);
             b.addEventListener("click", () => open(bucket, prefix + o.name));
             name.append(b);
           } else {
-            name.append(o.name);
+            name.append(el("span", { className: "folder" }, icon("file"), o.name));
             const dl = el("button", { type: "button" }, "Download");
             dl.addEventListener("click", () => {
               request(`${base}/object?${q(prefix + o.name)}`).then((r) => r.blob()).then((blob) => {
@@ -336,8 +359,8 @@ const views: Record<string, () => Promise<Node[]>> = {
             el("td", { title: o.updated_at }, new Date(o.updated_at).toLocaleString()), actions);
         });
         browser.replaceChildren(
-          el("div", { className: "toolbar" }, el("strong", {}, ...crumbs),
-            el("label", { htmlFor: "upload", className: "button" }, "Upload files"), file, message),
+          el("div", { className: "toolbar" }, el("span", { className: "crumbs" }, ...crumbs),
+            el("label", { htmlFor: "upload", className: "button" }, icon("upload"), "Upload files"), file, message),
           rows.length
             ? el("div", { className: "scroll" }, el("table", {},
                 el("thead", {}, el("tr", {}, ...["name", "type", "size", "updated", ""].map((h) => el("th", {}, h)))),
@@ -420,17 +443,64 @@ const views: Record<string, () => Promise<Node[]>> = {
     ];
   },
 
+  async logs() {
+    const service = el("select", { id: "log-service" }, el("option", { value: "" }, "All services"),
+      ...["core", "auth", "functions", "studio"].map((s) => el("option", { value: s }, s)));
+    const level = el("select", { id: "log-level" },
+      ...[["", "All levels"], ["info", "Info and above"], ["warning", "Warnings and errors"], ["error", "Errors only"]]
+        .map(([v, t]) => el("option", { value: v! }, t!)));
+    const search = el("input", { type: "search", id: "log-search", placeholder: "text, path, status…" });
+    const result = el("div");
+    const load = () => {
+      const params = new URLSearchParams({ service: service.value, level: level.value, q: search.value, limit: "300" });
+      api<{ entries: Row[]; services: string[] }>(`/api/logs?${params}`)
+        .then((r) => {
+          if (r.services.length === 0) {
+            result.replaceChildren(el("p", { className: "hint" }, "No log files yet. Services write them to their log volumes once started with this version."));
+            return;
+          }
+          const rows = r.entries.map((e) => {
+            const { ts, level: lvl, service: svc, msg, ...extra } = e;
+            const when = typeof ts === "number" ? new Date(ts * 1000) : null;
+            const lv = String(lvl ?? "");
+            const badge = lv === "error" || lv === "critical" ? "error" : lv === "warning" ? "warning" : "";
+            const details = Object.keys(extra).length
+              ? el("code", { className: "log-extra" }, Object.entries(extra).map(([k, v]) => `${k}=${text(v)}`).join("  "))
+              : "";
+            return el("tr", {},
+              el("td", { className: "nowrap", title: when?.toISOString() ?? "" }, when ? when.toLocaleTimeString() : ""),
+              el("td", {}, el("span", { className: "badge" }, String(svc ?? ""))),
+              el("td", {}, el("span", { className: `badge ${badge}` }, lv)),
+              el("td", { className: "log-msg" }, String(msg ?? ""), details));
+          });
+          result.replaceChildren(rows.length
+            ? el("div", { className: "scroll" }, el("table", {},
+                el("thead", {}, el("tr", {}, ...["time", "service", "level", "message"].map((h) => el("th", {}, h)))),
+                el("tbody", {}, ...rows)))
+            : el("p", { className: "hint" }, "Nothing matches."));
+        })
+        .catch((err: unknown) => fail(err, result));
+    };
+    const refresh = el("button", { type: "button" }, icon("refresh"), "Refresh");
+    refresh.addEventListener("click", load);
+    const form = el("form", {}, service, level, search, el("button", { type: "submit" }, "Filter"), refresh);
+    form.addEventListener("submit", (e) => { e.preventDefault(); load(); });
+    service.addEventListener("change", load);
+    level.addEventListener("change", load);
+    load();
+    return [form, result];
+  },
+
   async connect() {
     const info = await api<{ url: string; anon_key: string }>("/api/connect");
-    const field = (label: string, value: string) => el("div", { className: "toolbar" },
+    const field = (label: string, value: string) => el("div", { className: "kv" },
       el("strong", {}, label), el("code", { className: "secretish" }, value), copyButton(value));
     const js = `import { createClient } from "kilnbase";\n\nconst kb = createClient("${info.url}", "${info.anon_key}");\nconst { data, error } = await kb.from("todos").select();`;
     const py = `from kilnbase import create_client\n\nkb = create_client("${info.url}", "${info.anon_key}")\nrows = kb.from_("todos").select().execute()`;
     const curl = `curl "${info.url}/rest/v1/todos?select=*" -H "apikey: ${info.anon_key}"`;
     return [
       el("p", { className: "hint" }, "The anon key is meant for browsers and apps; row level security decides what it can reach. Never ship the service_role key."),
-      field("API URL", info.url),
-      field("anon key", info.anon_key),
+      el("div", { className: "panel" }, field("API URL", info.url), field("anon key", info.anon_key)),
       ...[["JavaScript", js], ["Python", py], ["curl", curl]].flatMap(([title, code]) => [
         el("h2", {}, title!, " ", copyButton(code!)), el("pre", { className: "code" }, code!)]),
     ];
@@ -487,7 +557,7 @@ const views: Record<string, () => Promise<Node[]>> = {
         el("td", { title: u.last_sign_in_at ?? "" }, u.last_sign_in_at ? new Date(u.last_sign_in_at).toLocaleString() : "never"),
         el("td", {}, String(u.active_sessions)),
         el("td", { title: u.created_at }, new Date(u.created_at).toLocaleString()),
-        el("td", {}, el("code", {}, u.id)),
+        el("td", { title: u.id }, el("code", {}, `${u.id.slice(0, 8)}…`)),
         el("td", { className: "actions" }, ...buttons));
     };
     const load = () => api<User[]>(`/api/users?search=${encodeURIComponent(search.value)}`)
@@ -599,11 +669,30 @@ function fail(err: unknown, target: HTMLElement): void {
   target.replaceChildren(el("p", { className: "error", role: "alert" }, err instanceof Error ? err.message : String(err)));
 }
 
+const SUBTITLES: Record<string, string> = {
+  tables: "Which tables the API serves, and the policies that decide who sees which rows.",
+  data: "Browse and edit rows.",
+  sql: "Run SQL against the database.",
+  database: "Postgres at a glance, and its extensions.",
+  users: "Everyone who can sign in.",
+  viewas: "See a table exactly as one user, or anon, sees it through the API.",
+  storage: "Buckets and the files in them.",
+  webhooks: "HTTP calls fired by table changes, and their delivery log.",
+  logs: "Recent log lines from the Kilnbase services.",
+  connect: "What an app needs to talk to this project.",
+};
+
 async function show(name: string): Promise<void> {
+  if (!(name in views)) name = "tables";
   for (const b of document.querySelectorAll<HTMLButtonElement>("#nav [data-view]")) {
-    if (b.dataset.view === name) b.setAttribute("aria-current", "page");
-    else b.removeAttribute("aria-current");
+    if (b.dataset.view === name) {
+      b.setAttribute("aria-current", "page");
+      $("page-title").textContent = b.textContent?.trim() ?? "";
+    } else b.removeAttribute("aria-current");
   }
+  $("page-sub").textContent = SUBTITLES[name] ?? "";
+  document.title = `${$("page-title").textContent} · Kilnbase Studio`;
+  if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   view.replaceChildren(el("p", { className: "hint" }, "Loading…"));
   try {
     view.replaceChildren(...(await views[name]!()));
@@ -613,16 +702,16 @@ async function show(name: string): Promise<void> {
 }
 
 function signIn(): void {
-  $("login").hidden = true;
-  $("nav").hidden = false;
-  void show("tables");
+  $("login-screen").hidden = true;
+  $("app").hidden = false;
+  void show(location.hash.slice(1) || "tables");
 }
 
 function signOut(message = ""): void {
   sessionStorage.removeItem(KEY);
   view.replaceChildren();
-  $("nav").hidden = true;
-  $("login").hidden = false;
+  $("app").hidden = true;
+  $("login-screen").hidden = false;
   $("login-error").textContent = message;
 }
 

@@ -3,7 +3,7 @@ WORKDIR /web
 COPY studio/web/package.json studio/web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY studio/web ./
-RUN npx tsc -p . --outDir /out
+RUN npm run build -- --outDir /out
 
 FROM python:3.15.1-slim-trixie
 COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
@@ -13,7 +13,7 @@ COPY pyproject.toml uv.lock ./
 # Studio reuses the auth package's token claims and log format (never its key or migrations).
 COPY auth ./auth
 COPY studio ./studio
-COPY --from=web /out/app.js ./studio/src/kilnbase_studio/web/app.js
+COPY --from=web /out ./studio/src/kilnbase_studio/web
 # uv needs every workspace member's manifest to validate the lock file.
 COPY cli/pyproject.toml ./cli/pyproject.toml
 COPY functions-runner/pyproject.toml ./functions-runner/pyproject.toml

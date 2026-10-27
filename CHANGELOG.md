@@ -22,6 +22,12 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 - **Logs**: core, auth, functions and Studio also write their JSON log lines to a per-service volume (10 MB,
   one rotation); Studio reads them read-only. Postgres, PostgREST and imgproxy still log to stderr only.
 
+### Changed
+- **Studio**: new look: a sidebar with grouped sections, a sign-in card, light and dark themes that follow the
+  system, consistent tables, badges and forms, and a layout that works on phones. The open page is kept in the
+  URL. The UI is built with Vite (still no framework: about 11 KB gzipped); `npm run dev` in `studio/web` serves
+  it with live reload against a running Studio.
+
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.
 

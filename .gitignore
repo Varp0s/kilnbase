@@ -10,7 +10,8 @@ kilnbase-backup-*.tar
 kilnbase-pre-upgrade-*.tar
 kilnbase-rollback.json
 *.partial
-studio/src/kilnbase_studio/web/app.js
+# Built by `npm run build` in studio/web (Vite).
+studio/src/kilnbase_studio/web/
 studio/web/node_modules/
 functions/.secrets
 graphql/node_modules/
