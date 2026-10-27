@@ -50,7 +50,10 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
 
 interface Policy { name: string; command: string; roles: string[]; using: string | null; check: string | null }
 interface TableInfo { name: string; rls: boolean; policies: Policy[] }
-interface User { id: string; email: string | null; created_at: string; is_anonymous: boolean }
+interface User {
+  id: string; email: string | null; created_at: string; is_anonymous: boolean;
+  email_confirmed_at: string | null; last_sign_in_at: string | null; active_sessions: number;
+}
 interface ViewAsResult { role: string; claims: Row; denied: boolean; rows: Row[] }
 interface Column { name: string; type: string; nullable: boolean; default: string | null; primary_key: boolean; read_only: boolean }
 interface RowsPage { columns: Column[]; key: string[]; rows: Row[] }
@@ -244,13 +247,58 @@ const views: Record<string, () => Promise<Node[]>> = {
   async users() {
     const result = el("div");
     const search = el("input", { type: "search", placeholder: "email contains…", id: "user-search" });
+    const act = (u: User, action: string, question: string) => {
+      if (!confirm(question)) return;
+      api(`/api/users/${u.id}/${action}`, {}).then(() => load()).catch((err: unknown) => fail(err, result));
+    };
+    const row = (u: User) => {
+      const buttons: HTMLButtonElement[] = [];
+      const button = (label: string, action: string, question: string, danger = false) => {
+        const b = el("button", { type: "button", className: danger ? "danger" : "" }, label);
+        b.addEventListener("click", () => act(u, action, question));
+        buttons.push(b);
+      };
+      if (u.email && !u.email_confirmed_at) button("Confirm email", "confirm-email", `Mark ${u.email} as confirmed?`);
+      if (u.active_sessions > 0) {
+        button("Sign out", "sign-out", "End all sessions? Refresh tokens stop working now; access tokens already issued stay valid for up to an hour.");
+      }
+      button("Delete", "delete", `Delete ${u.email ?? u.id} and everything linked to the account? This cannot be undone.`, true);
+      return el("tr", {},
+        el("td", {}, u.email ?? el("span", { className: "hint" }, "anonymous")),
+        el("td", {}, u.email_confirmed_at ? el("span", { className: "ok" }, "confirmed") : el("span", { className: "hint" }, "unconfirmed")),
+        el("td", { title: u.last_sign_in_at ?? "" }, u.last_sign_in_at ? new Date(u.last_sign_in_at).toLocaleString() : "never"),
+        el("td", {}, String(u.active_sessions)),
+        el("td", { title: u.created_at }, new Date(u.created_at).toLocaleString()),
+        el("td", {}, el("code", {}, u.id)),
+        el("td", { className: "actions" }, ...buttons));
+    };
     const load = () => api<User[]>(`/api/users?search=${encodeURIComponent(search.value)}`)
-      .then((users) => result.replaceChildren(table(users as unknown as Row[], ["email", "id", "created_at", "is_anonymous"])))
+      .then((users) => result.replaceChildren(users.length
+        ? el("div", { className: "scroll" }, el("table", {},
+            el("thead", {}, el("tr", {}, ...["email", "status", "last sign-in", "sessions", "created", "id", ""].map((h) => el("th", {}, h)))),
+            el("tbody", {}, ...users.map(row))))
+        : el("p", { className: "hint" }, "No users.")))
       .catch((err: unknown) => fail(err, result));
     const form = el("form", {}, el("label", { htmlFor: "user-search" }, "Search"), search, el("button", { type: "submit" }, "Find"));
     form.addEventListener("submit", (e) => { e.preventDefault(); void load(); });
+
+    const email = el("input", { type: "email", id: "new-email", required: true, placeholder: "user@example.com" });
+    const password = el("input", { type: "password", id: "new-password", autocomplete: "new-password", placeholder: "empty: link / code / provider only" });
+    const confirmed = el("input", { type: "checkbox", id: "new-confirmed", checked: true });
+    const message = el("p", { className: "hint" });
+    const create = el("form", {},
+      el("label", { htmlFor: "new-email" }, "New user"), email,
+      el("label", { htmlFor: "new-password" }, "Password"), password,
+      el("label", { htmlFor: "new-confirmed" }, confirmed, " Email confirmed"),
+      el("button", { type: "submit" }, "Create"), message);
+    create.addEventListener("submit", (e) => {
+      e.preventDefault();
+      api<User>("/api/users", { email: email.value, password: password.value || null, email_confirmed: confirmed.checked })
+        .then(() => { email.value = ""; password.value = ""; message.textContent = "Created."; void load(); })
+        .catch((err: unknown) => fail(err, message));
+    });
     void load();
-    return [form, result];
+    return [form, create, result];
   },
 
   async webhooks() {

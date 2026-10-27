@@ -85,7 +85,15 @@ def test_pages_are_locked_down():
 def test_user_list_has_no_secrets(client, keys):
     sign_up(client, keys)
     users = httpx.get(f"{STUDIO}/api/users", headers=admin(keys)).json()
-    assert users and set(users[0]) == {"id", "email", "created_at", "is_anonymous"}
+    assert users and set(users[0]) == {
+        "id",
+        "email",
+        "created_at",
+        "is_anonymous",
+        "email_confirmed_at",
+        "last_sign_in_at",
+        "active_sessions",
+    }
 
 
 def test_view_as_matches_the_rest_api(client, keys):
@@ -190,3 +198,37 @@ def test_sql_editor_can_roll_back_and_reports_errors(keys):
     status, body = sql(keys, "select * from no_such_table")
     assert status == 400 and "no_such_table" in body["message"]
     assert httpx.post(f"{STUDIO}/api/sql", json={"query": "select 1"}).status_code == 401
+
+
+def test_users_can_be_created_confirmed_signed_out_and_deleted(client, keys):
+    email = f"studio-{uuid.uuid4().hex[:10]}@example.com"
+    r = httpx.post(
+        f"{STUDIO}/api/users",
+        headers=admin(keys),
+        json={"email": email, "password": PASSWORD, "email_confirmed": False},
+    )
+    assert r.status_code == 200, r.text
+    user_id = r.json()["id"]
+    dup = httpx.post(f"{STUDIO}/api/users", headers=admin(keys), json={"email": email.upper()})
+    assert dup.json()["code"] == "email_taken"
+
+    body = {"email": email, "password": PASSWORD}
+    session = client.post(
+        "/auth/v1/token?grant_type=password", headers={"apikey": keys.anon}, json=body
+    )
+    assert session.status_code == 200, session.text
+
+    def act(action):
+        return httpx.post(f"{STUDIO}/api/users/{user_id}/{action}", headers=admin(keys))
+
+    assert act("confirm-email").status_code == 200
+    assert act("sign-out").status_code == 200
+    refresh = client.post(
+        "/auth/v1/token?grant_type=refresh_token",
+        headers={"apikey": keys.anon},
+        json={"refresh_token": session.json()["refresh_token"]},
+    )
+    assert refresh.status_code in (400, 401), refresh.text
+    assert act("delete").status_code == 200
+    assert act("delete").status_code == 404
+    assert act("promote").status_code == 400

@@ -10,6 +10,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   key, as service_role).
 - **Studio**: SQL editor (runs as the database superuser in one transaction, optionally rolled back; first
   500 rows shown).
+- **Studio**: create users (with or without a password), confirm their email, end all their sessions and delete
+  them; the user list shows sign-in and session details.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.

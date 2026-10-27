@@ -6,9 +6,12 @@ from pathlib import Path
 from uuid import UUID
 
 import asyncpg
+from argon2 import PasswordHasher
 from fastapi import Depends, FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from kilnbase_auth.app import MIN_PASSWORD_LENGTH, normalize_email
 from kilnbase_auth.tokens import ACCESS_TOKEN_LIFETIME, user_claims
 from pydantic import BaseModel, Field
 
@@ -42,7 +45,10 @@ select c.relname as name, c.relrowsecurity as rls,
 """
 # Explicit columns only: auth tables also hold password hashes, MFA secrets and token hashes.
 USERS_SQL = """
-select id, email, created_at, is_anonymous from auth.users
+select id, email, created_at, is_anonymous, email_confirmed_at, last_sign_in_at,
+       (select count(*) from auth.sessions s
+         where s.user_id = u.id and s.revoked_at is null) as active_sessions
+  from auth.users u
  where $1 = '' or strpos(lower(email), lower($1)) > 0
  order by created_at desc limit 50
 """
@@ -91,6 +97,13 @@ def cell(value):
         return value
     text = value if isinstance(value, str) else str(value)
     return text if len(text) <= SQL_MAX_CELL else text[:SQL_MAX_CELL] + "…"
+
+
+class NewUser(BaseModel):
+    email: str = Field(max_length=254)
+    # None creates a user who signs in with a link, code or provider only.
+    password: str | None = Field(default=None, max_length=1024)
+    email_confirmed: bool = True
 
 
 class RowWrite(BaseModel):
@@ -144,6 +157,48 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/users", dependencies=[Depends(admin)])
     async def users(search: str = "") -> list[dict]:
         return [dict(r) for r in await app.state.pool.fetch(USERS_SQL, search[:200])]
+
+    hasher = PasswordHasher()
+
+    @app.post("/api/users", dependencies=[Depends(admin)])
+    async def create_user(body: NewUser):
+        email = normalize_email(body.email)
+        if email is None:
+            return error(422, "invalid_email", "email address is not valid")
+        password_hash = None
+        if body.password is not None:
+            if len(body.password) < MIN_PASSWORD_LENGTH:
+                message = f"password must be at least {MIN_PASSWORD_LENGTH} characters"
+                return error(422, "weak_password", message)
+            password_hash = await run_in_threadpool(hasher.hash, body.password)
+        try:
+            row = await app.state.pool.fetchrow(
+                "insert into auth.users (email, password_hash, email_confirmed_at)"
+                " values ($1, $2, case when $3 then now() end) returning id, email",
+                email,
+                password_hash,
+                body.email_confirmed,
+            )
+        except asyncpg.UniqueViolationError:
+            return error(422, "email_taken", "a user with this email already exists")
+        return dict(row)
+
+    @app.post("/api/users/{user_id}/{action}", dependencies=[Depends(admin)])
+    async def user_action(user_id: UUID, action: str):
+        """delete, confirm-email or sign-out (revokes every session's refresh tokens)."""
+        sql = {
+            "delete": "delete from auth.users where id = $1 returning id",
+            "confirm-email": "update auth.users set email_confirmed_at = coalesce("
+            "email_confirmed_at, now()) where id = $1 returning id",
+            "sign-out": "with u as (select id from auth.users where id = $1),"
+            " s as (update auth.sessions set revoked_at = now()"
+            " where user_id = $1 and revoked_at is null) select id from u",
+        }.get(action)
+        if sql is None:
+            return error(400, "invalid_request", "action is delete, confirm-email or sign-out")
+        if await app.state.pool.fetchval(sql, user_id) is None:
+            return error(404, "not_found", "no such user")
+        return {"ok": True}
 
     @app.get("/api/webhook-deliveries", dependencies=[Depends(admin)])
     async def deliveries() -> list[dict]:
