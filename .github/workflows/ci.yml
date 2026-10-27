@@ -63,6 +63,8 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: astral-sh/setup-uv@v10.3.2
       - run: uv run kilnbase init
+      # Ubuntu 23.10+ forbids user namespaces to unconfined processes; Functions needs them (README).
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build --wait
       - name: health checks
         run: |

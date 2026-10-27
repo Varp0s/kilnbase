@@ -52,7 +52,8 @@ def main() -> None:
     if problem := jail_works(config):
         log.error(
             "cannot create a sandbox; the container needs the seccomp profile in "
-            "functions-runner/seccomp.json and apparmor=unconfined, as in docker-compose.yml: %s",
+            "functions-runner/seccomp.json and apparmor=unconfined, as in docker-compose.yml, and on "
+            "Ubuntu 23.10+ hosts kernel.apparmor_restrict_unprivileged_userns=0: %s",
             problem,
         )
         sys.exit(1)
