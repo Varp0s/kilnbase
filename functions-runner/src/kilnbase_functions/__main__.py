@@ -45,8 +45,9 @@ def main() -> None:
         sys.exit(1)
     if problem := jail_works(config):
         log.error(
-            "cannot create a sandbox; the container needs seccomp=unconfined (and on hosts that "
-            "restrict user namespaces with AppArmor, apparmor=unconfined): %s",
+            "cannot create a sandbox; the container needs the seccomp profile in "
+            "functions-runner/seccomp.json (and on hosts that restrict user namespaces with "
+            "AppArmor, apparmor=unconfined): %s",
             problem,
         )
         sys.exit(1)
