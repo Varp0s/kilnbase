@@ -52,8 +52,7 @@ def main() -> None:
     if problem := jail_works(config):
         log.error(
             "cannot create a sandbox; the container needs the seccomp profile in "
-            "functions-runner/seccomp.json (and on hosts that restrict user namespaces with "
-            "AppArmor, apparmor=unconfined): %s",
+            "functions-runner/seccomp.json and apparmor=unconfined, as in docker-compose.yml: %s",
             problem,
         )
         sys.exit(1)
