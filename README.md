@@ -2,7 +2,8 @@
 
 Open-source, self-hosted backend: Postgres, Auth, REST, Realtime and Storage — secure by default, fast, and simple to run.
 
-> **Status:** early development (pre-0.1). Not ready for production.
+> **Status:** 0.x, under active development; not ready for production yet. What is available, planned or
+> out of scope: [docs/parity.md](docs/parity.md).
 
 ## Quick start
 
