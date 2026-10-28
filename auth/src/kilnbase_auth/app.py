@@ -66,6 +66,7 @@ class PasswordChange(BaseModel):
     password: str | None = Field(default=None, max_length=1024)
     current_password: str | None = Field(default=None, max_length=1024)
     email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
 
 
 class EmailChangeVerify(BaseModel):
@@ -627,8 +628,7 @@ def create_app(config: Config) -> FastAPI:
             return error(503, "mail_unavailable", "could not send the email, try again later")
         return None
 
-    async def send_sms_code(phone: str, create_user: bool, ip: str) -> JSONResponse | None:
-        """Stores a fresh code for the number and texts it; None on success."""
+    def sms_limited(phone: str, ip: str) -> JSONResponse | None:
         for limiter, key in [(otp_phone_limiter, phone), (otp_ip_limiter, ip)]:
             if wait := limiter.retry_after(key):
                 return error(
@@ -638,6 +638,12 @@ def create_app(config: Config) -> FastAPI:
                     headers={"Retry-After": str(wait)},
                 )
             limiter.fail(key)
+        return None
+
+    async def send_sms_code(phone: str, create_user: bool, ip: str) -> JSONResponse | None:
+        """Stores a fresh code for the number and texts it; None on success."""
+        if failed := sms_limited(phone, ip):
+            return failed
         code = f"{secrets.randbelow(10**6):06d}"
         await app.state.pool.execute(
             "insert into auth.phone_codes (phone, code_hash, create_user) values ($1, $2, $3)"
@@ -871,7 +877,8 @@ def create_app(config: Config) -> FastAPI:
 
     async def check_current_password(row, current: str | None) -> JSONResponse | None:
         """Re-authentication for sensitive changes; rate limited like sign-in."""
-        key = f"email:{row['email']}"
+        # Phone-only users have no email; keyed by email alone they would share one budget.
+        key = f"email:{row['email'] or row['phone']}"
         if wait := email_limiter.retry_after(key):
             return error(
                 429,
@@ -890,7 +897,7 @@ def create_app(config: Config) -> FastAPI:
 
     async def own_row(conn, claims: dict):
         return await conn.fetchrow(
-            "select u.email, u.password_hash, s.recovery from auth.users u"
+            "select u.email, u.phone, u.password_hash, s.recovery from auth.users u"
             " join auth.sessions s on s.user_id = u.id"
             " where u.id = $1::uuid and s.id = $2::uuid",
             claims["sub"],
@@ -911,6 +918,10 @@ def create_app(config: Config) -> FastAPI:
             return error(
                 422, "weak_password", f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
+        if body.phone is not None:
+            if body.email is not None or body.password is not None:
+                return error(422, "invalid_request", "change the phone on its own")
+            return await request_phone_change(claims, body, request)
         if claims.get("is_anonymous"):
             if body.email is None or body.password is None:
                 return error(422, "invalid_request", "anonymous users must set email and password")
@@ -1068,6 +1079,99 @@ def create_app(config: Config) -> FastAPI:
             )
             return await issue_session(
                 conn, uuid.UUID(claims["sub"]), row["new_email"], uuid.UUID(claims["sid"])
+            )
+
+    async def request_phone_change(claims: dict, body: PasswordChange, request: Request):
+        """Texts a code to the new number; nothing changes until it is entered.
+
+        Also how an anonymous user becomes a permanent one with just a phone.
+        """
+        new_phone = normalize_phone(body.phone or "")
+        if new_phone is None:
+            return error(422, "invalid_phone", "phone number must be in E.164 form")
+        async with app.state.pool.acquire() as conn:
+            row = await own_row(conn, claims)
+            if row is None:
+                return error(401, "unauthorized", "a valid access token is required")
+            if new_phone == row["phone"]:
+                return error(400, "same_phone", "that is already your phone number")
+            if row["password_hash"] and not row["recovery"]:
+                if failed := await check_current_password(row, body.current_password):
+                    return failed
+            if await conn.fetchval("select 1 from auth.users where phone = $1", new_phone):
+                return error(422, "phone_taken", "a user with this phone number already exists")
+            if failed := sms_limited(new_phone, client_ip(request)):
+                return failed
+            code = f"{secrets.randbelow(10**6):06d}"
+            await conn.execute(
+                "insert into auth.phone_changes (user_id, new_phone, code_hash)"
+                " values ($1::uuid, $2, $3) on conflict (user_id) do update"
+                " set new_phone = excluded.new_phone, code_hash = excluded.code_hash,"
+                " attempts = 0, created_at = now()",
+                claims["sub"],
+                new_phone,
+                digest(f"{claims['sub']}:{new_phone}:{code}"),
+            )
+        minutes = OTP_LIFETIME // 60
+        text = f"Your code to confirm this number is {code}. It expires in {minutes} minutes."
+        try:
+            await sms.send(app.state.http, new_phone, text)
+        except httpx.HTTPError as e:
+            log.error("sending SMS failed: %s", type(e).__name__)
+            await app.state.pool.execute(
+                "delete from auth.phone_changes where user_id = $1::uuid", claims["sub"]
+            )
+            return error(503, "sms_unavailable", "could not send the text message, try again later")
+        return JSONResponse({"phone_change_sent": True}, status_code=202)
+
+    @app.post("/user/phone/verify")
+    async def confirm_phone_change(body: EmailChangeVerify, request: Request):
+        claims = await current_session(request)
+        if claims is None or claims["role"] != "authenticated":
+            return error(401, "unauthorized", "a fully signed-in session is required")
+        invalid = error(400, "invalid_otp", "code is wrong, expired or already used")
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select new_phone, code_hash, attempts,"
+                " created_at > now() - make_interval(secs => $2) as fresh"
+                " from auth.phone_changes where user_id = $1::uuid for update",
+                claims["sub"],
+                OTP_LIFETIME,
+            )
+            if row is None:
+                return invalid
+            expected = digest(f"{claims['sub']}:{row['new_phone']}:{body.token}")
+            if not (
+                row["fresh"]
+                and row["attempts"] < OTP_MAX_ATTEMPTS
+                and hmac.compare_digest(expected, row["code_hash"])
+            ):
+                await conn.execute(
+                    "update auth.phone_changes set attempts = attempts + 1"
+                    " where user_id = $1::uuid",
+                    claims["sub"],
+                )
+                return invalid
+            await conn.execute(
+                "delete from auth.phone_changes where user_id = $1::uuid", claims["sub"]
+            )
+            try:
+                email = await conn.fetchval(
+                    "update auth.users set phone = $2, is_anonymous = false, updated_at = now()"
+                    " where id = $1::uuid returning email",
+                    claims["sub"],
+                    row["new_phone"],
+                )
+            except asyncpg.UniqueViolationError:
+                return error(422, "phone_taken", "a user with this phone number already exists")
+            await conn.execute(
+                "update auth.sessions set revoked_at = now()"
+                " where user_id = $1::uuid and id <> $2::uuid and revoked_at is null",
+                claims["sub"],
+                claims["sid"],
+            )
+            return await issue_session(
+                conn, uuid.UUID(claims["sub"]), email, uuid.UUID(claims["sid"])
             )
 
     async def upgrade_anonymous(claims: dict, body: PasswordChange, request: Request):

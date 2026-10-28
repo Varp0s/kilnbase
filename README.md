@@ -304,6 +304,9 @@ to it was entered, and access tokens carry it as `phone`. Kilnbase does not talk
 `v1=` + HMAC-SHA256 of `"<X-Kilnbase-Timestamp>.<body>"`), and must answer 2xx once the text is sent. Without a
 hook, texts are printed to the auth log for local development. JS: `kb.auth.signInWithOtp({ phone })`,
 `kb.auth.verifyOtp({ type: "sms", phone, token })`; Python: `sign_in_with_otp(phone=...)`.
+A signed-in user adds or changes their number with `PUT /auth/v1/user {"phone", "current_password"}` (the
+password only if the account has one), then `POST /auth/v1/user/phone/verify {"token"}` with the texted code;
+other sessions are signed out. This also keeps an anonymous user's account with just a phone.
 
 **Email confirmation and password reset.** With SMTP configured, password sign-ups get a confirmation mail
 (`POST /auth/v1/verify {"type":"signup", ...}`); access tokens carry `email_verified`, so a policy can require it:

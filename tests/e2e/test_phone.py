@@ -127,3 +127,74 @@ def test_texts_per_number_are_limited(client, keys):
     phone = number()
     statuses = [request_code(client, keys, phone).status_code for _ in range(6)]
     assert statuses == [200] * 5 + [429]
+
+
+def bearer(keys, token):
+    return {"apikey": keys.anon, "Authorization": f"Bearer {token}"}
+
+
+def test_adding_a_phone_to_an_account(client, keys):
+    email = f"phone-{secrets.token_hex(5)}@example.com"
+    password = "a long passphrase"
+    session = client.post(
+        "/auth/v1/signup",
+        headers={"apikey": keys.anon},
+        json={"email": email, "password": password},
+    ).json()
+    other = client.post(
+        "/auth/v1/token?grant_type=password",
+        headers={"apikey": keys.anon},
+        json={"email": email, "password": password},
+    ).json()
+    token, phone = session["access_token"], number()
+
+    # Like an email change, it needs the current password.
+    r = client.put("/auth/v1/user", headers=bearer(keys, token), json={"phone": phone})
+    assert r.status_code == 400
+    body = {"phone": phone, "current_password": password}
+    r = client.put("/auth/v1/user", headers=bearer(keys, token), json=body)
+    assert r.status_code == 202, r.text
+    code = latest_code(phone)
+
+    r = client.post("/auth/v1/user/phone/verify", headers=bearer(keys, token), json={"token": code})
+    assert r.status_code == 200, r.text
+    claims = jwt.decode(r.json()["access_token"], options={"verify_signature": False})
+    assert claims["phone"] == phone and claims["email"] == email
+    # Other sessions are signed out.
+    refresh = client.post(
+        "/auth/v1/token?grant_type=refresh_token",
+        headers={"apikey": keys.anon},
+        json={"refresh_token": other["refresh_token"]},
+    )
+    assert refresh.status_code == 401
+
+    # The number now signs in to the same account.
+    request_code(client, keys, phone, create_user=False)
+    again = verify(client, keys, phone, latest_code(phone))
+    assert again.json()["user"]["id"] == session["user"]["id"]
+
+    # Nobody else can claim it.
+    taken = sign_in(client, keys, number())
+    r = client.put("/auth/v1/user", headers=bearer(keys, taken), json={"phone": phone})
+    assert r.status_code == 422 and r.json()["code"] == "phone_taken"
+
+
+def sign_in(client, keys, phone) -> str:
+    request_code(client, keys, phone)
+    return verify(client, keys, phone, latest_code(phone)).json()["access_token"]
+
+
+def test_anonymous_user_keeps_their_account_with_a_phone(client, keys):
+    guest = client.post("/auth/v1/anonymous", headers={"apikey": keys.anon}).json()
+    token, phone = guest["access_token"], number()
+    r = client.put("/auth/v1/user", headers=bearer(keys, token), json={"phone": phone})
+    assert r.status_code == 202, r.text
+    r = client.post(
+        "/auth/v1/user/phone/verify",
+        headers=bearer(keys, token),
+        json={"token": latest_code(phone)},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["id"] == guest["user"]["id"]
+    claims = jwt.decode(r.json()["access_token"], options={"verify_signature": False})
+    assert claims["is_anonymous"] is False and claims["phone"] == phone
