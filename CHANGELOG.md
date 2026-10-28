@@ -49,6 +49,12 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   recent errors), confirmation dialogs and toasts instead of browser prompts, loading placeholders and empty
   states, a light / dark / system theme switch, and the Inter typeface served by Studio itself.
 
+### Security
+- **S3 API**: streamed (`aws-chunked`) uploads are verified: every chunk signature and a signed trailer must chain
+  from the request signature, and `x-amz-checksum-*` values (CRC32, CRC32C, CRC64/NVME, SHA-1, SHA-256, sent as a
+  header or trailer) must match the stored bytes. A failed check stores nothing. SigV4a (ECDSA) streaming answers
+  `NotImplemented`.
+
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.
 - **S3 API**: multipart completion bodies are now checked against `x-amz-content-sha256`.

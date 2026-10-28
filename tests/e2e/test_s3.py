@@ -1,14 +1,22 @@
 """S3-compatible API, exercised with a real S3 client (boto3) rather than our own signer."""
 
+import base64
+import hashlib
+import hmac
 import io
 import os
 import uuid
+import zlib
+from urllib.parse import quote
 
 import boto3
 import httpx2 as httpx
 import pytest
 from boto3.s3.transfer import TransferConfig
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 from botocore.config import Config
+from botocore.credentials import Credentials
 from botocore.exceptions import ClientError
 from conftest import BASE_URL, psql
 from test_storage import POLICIES
@@ -145,6 +153,123 @@ def test_presigned_urls(service):
 
     tampered = url.replace("X-Amz-Expires=60", "X-Amz-Expires=600")
     assert httpx.get(tampered).status_code == 403
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def streamed_put(key, data, payload, *, trailer=None, tamper=lambda chunks: chunks):
+    """PUTs `data` as aws-chunked (64 KiB chunks), signing the chunks as streaming SigV4 does.
+
+    boto3 never sends signed chunks, so the request is built here; `tamper` edits the
+    `[header line, data]` pairs (final 0-size chunk included) before they are sent.
+    """
+    url = f"{ENDPOINT}/e2e-s3/{quote(key)}"
+    headers = {
+        "x-amz-content-sha256": payload,
+        "content-encoding": "aws-chunked",
+        "x-amz-decoded-content-length": str(len(data)),
+        "content-type": "text/plain",
+    }
+    if trailer:
+        headers["x-amz-trailer"] = trailer[0]
+    request = AWSRequest("PUT", url, headers=headers)
+    SigV4Auth(Credentials(*SERVICE_KEY), "s3", "us-east-1").add_auth(request)
+    amz_date = request.headers["X-Amz-Date"]
+    scope = f"{amz_date[:8]}/us-east-1/s3/aws4_request"
+    key_bytes = f"AWS4{SERVICE_KEY[1]}".encode()
+    for part in (amz_date[:8], "us-east-1", "s3", "aws4_request"):
+        key_bytes = hmac.new(key_bytes, part.encode(), hashlib.sha256).digest()
+    previous = request.headers["Authorization"].rsplit("Signature=", 1)[1]
+
+    def sign(algorithm, payload_hash):
+        nonlocal previous
+        sts = f"{algorithm}\n{amz_date}\n{scope}\n{previous}\n{payload_hash}"
+        previous = hmac.new(key_bytes, sts.encode(), hashlib.sha256).hexdigest()
+        return previous
+
+    signed = payload.startswith("STREAMING-AWS4-HMAC-SHA256")
+    pieces = [data[i : i + 65536] for i in range(0, len(data), 65536)] + [b""]
+    chunks = []
+    for piece in pieces:
+        line = f"{len(piece):x}"
+        if signed:
+            digest = hashlib.sha256(piece).hexdigest()
+            line += ";chunk-signature=" + sign(
+                "AWS4-HMAC-SHA256-PAYLOAD", f"{EMPTY_SHA256}\n{digest}"
+            )
+        chunks.append([line, piece])
+    body = b"".join(
+        f"{line}\r\n".encode() + piece + (b"\r\n" if piece else b"")
+        for line, piece in tamper(chunks)
+    )
+    if trailer:
+        body += f"{trailer[0]}:{trailer[1]}\r\n".encode()
+        if signed:
+            canonical = f"{trailer[0]}:{trailer[1]}\n".encode()
+            sig = sign("AWS4-HMAC-SHA256-TRAILER", hashlib.sha256(canonical).hexdigest())
+            body += f"x-amz-trailer-signature:{sig}\r\n".encode()
+    return httpx.put(url, headers=dict(request.headers), content=body + b"\r\n")
+
+
+def crc32(data: bytes) -> str:
+    return base64.b64encode(zlib.crc32(data).to_bytes(4, "big")).decode()
+
+
+def test_streamed_uploads_verify_chunk_signatures_and_checksums(service):
+    data = os.urandom(150 * 1024)
+    signed = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+    trailer = ("x-amz-checksum-crc32", crc32(data))
+
+    for payload, extra in [
+        (signed, {}),
+        (signed + "-TRAILER", {"trailer": trailer}),
+        ("STREAMING-UNSIGNED-PAYLOAD-TRAILER", {"trailer": trailer}),
+    ]:
+        key = f"{uuid.uuid4().hex}/streamed.bin"
+        r = streamed_put(key, data, payload, **extra)
+        assert r.status_code == 200, (payload, r.text)
+        assert service.get_object(Bucket="e2e-s3", Key=key)["Body"].read() == data
+
+    def flip_byte(chunks):
+        chunks[1][1] = b"x" + chunks[1][1][1:]
+        return chunks
+
+    def wrong_final_signature(chunks):
+        line = chunks[-1][0]
+        chunks[-1][0] = line[:-1] + ("1" if line[-1] == "0" else "0")
+        return chunks
+
+    def unsigned_chunk(chunks):
+        chunks[0][0] = chunks[0][0].split(";")[0]
+        return chunks
+
+    for tamper, status, error in [
+        (flip_byte, 403, "SignatureDoesNotMatch"),
+        (wrong_final_signature, 403, "SignatureDoesNotMatch"),
+        (unsigned_chunk, 400, "InvalidArgument"),
+    ]:
+        key = f"{uuid.uuid4().hex}.bin"
+        r = streamed_put(key, data, signed, tamper=tamper)
+        assert r.status_code == status and error in r.text, (tamper.__name__, r.text)
+        with pytest.raises(ClientError):
+            service.head_object(Bucket="e2e-s3", Key=key)
+
+    bad = ("x-amz-checksum-crc32", crc32(data + b"!"))
+    for payload in (signed + "-TRAILER", "STREAMING-UNSIGNED-PAYLOAD-TRAILER"):
+        r = streamed_put(f"{uuid.uuid4().hex}.bin", data, payload, trailer=bad)
+        assert r.status_code == 400 and "BadDigest" in r.text, (payload, r.text)
+    r = streamed_put(f"{uuid.uuid4().hex}.bin", data, "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD")
+    assert r.status_code == 501
+
+    with pytest.raises(ClientError) as e:
+        service.put_object(
+            Bucket="e2e-s3",
+            Key=f"{uuid.uuid4().hex}.txt",
+            Body=b"payload",
+            ChecksumSHA256=base64.b64encode(hashlib.sha256(b"other").digest()).decode(),
+        )
+    assert code(e) == "BadDigest"
 
 
 def test_bad_credentials_are_rejected(keys):

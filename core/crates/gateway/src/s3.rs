@@ -14,6 +14,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -33,6 +34,7 @@ const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 const MAX_SKEW: u64 = 15 * 60;
 const MAX_PRESIGN: u64 = 7 * 24 * 3600;
 const XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const ISO_DATE: &str = r#"to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#;
 
 pub struct S3Error {
@@ -51,6 +53,14 @@ fn err(status: StatusCode, code: &'static str, message: &'static str) -> S3Error
 
 fn denied(message: &'static str) -> S3Error {
     err(StatusCode::FORBIDDEN, "AccessDenied", message)
+}
+
+fn signature_mismatch() -> S3Error {
+    err(
+        StatusCode::FORBIDDEN,
+        "SignatureDoesNotMatch",
+        "the request signature does not match",
+    )
 }
 
 fn not_implemented() -> S3Error {
@@ -341,15 +351,8 @@ fn authenticate(
     uri: &Uri,
     t: &Target,
     headers: &HeaderMap,
-) -> Result<Caller, S3Error> {
+) -> Result<(Caller, Option<ChunkSigner>), S3Error> {
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
-    let mismatch = || {
-        err(
-            StatusCode::FORBIDDEN,
-            "SignatureDoesNotMatch",
-            "the request signature does not match",
-        )
-    };
     let presigned = t.param("X-Amz-Algorithm").is_some();
     let (credential, signed, signature, amz_date, payload_hash, expires) = if presigned {
         if t.param("X-Amz-Algorithm") != Some(ALGORITHM) {
@@ -458,17 +461,20 @@ fn authenticate(
         signed,
         payload_hash,
     )
-    .ok_or_else(mismatch)?;
-    let tag = unhex(signature).ok_or_else(mismatch)?;
-    let sts = string_to_sign(
-        amz_date,
-        &format!("{date}/{region}/s3/aws4_request"),
-        &canonical,
-    );
+    .ok_or_else(signature_mismatch)?;
+    let tag = unhex(signature).ok_or_else(signature_mismatch)?;
+    let scope = format!("{date}/{region}/s3/aws4_request");
+    let sts = string_to_sign(amz_date, &scope, &canonical);
+    let key = signing_key(secret, date, region);
     // Constant-time comparison.
-    hmac::verify(&signing_key(secret, date, region), sts.as_bytes(), &tag)
-        .map_err(|_| mismatch())?;
-    Ok(caller)
+    hmac::verify(&key, sts.as_bytes(), &tag).map_err(|_| signature_mismatch())?;
+    // Only a header signature can seed signed chunks; a presigned URL never streams them.
+    let signer = (!presigned).then(|| ChunkSigner {
+        key,
+        prefix: format!("{amz_date}\n{scope}\n"),
+        previous: signature.to_owned(),
+    });
+    Ok((caller, signer))
 }
 
 // ---- aws-chunked ----
@@ -483,13 +489,46 @@ enum Chunk {
     Done,
 }
 
-/// Strips `aws-chunked` framing (what SDKs send for streamed uploads over TLS).
-// shortcut: chunk signatures and checksum trailers are not verified, so these bodies get the
-// same trust as UNSIGNED-PAYLOAD; verify them if integrity beyond TLS is ever required.
+/// Streaming SigV4: each chunk's signature covers its data and the signature before it, starting
+/// from the request's own signature.
+struct ChunkSigner {
+    key: hmac::Key,
+    /// `"{amz date}\n{scope}\n"`
+    prefix: String,
+    previous: String,
+}
+
+impl ChunkSigner {
+    /// Checks `signature` over `hash` and makes it the link the next one must follow.
+    fn verify(&mut self, algorithm: &str, hash: &str, signature: &[u8]) -> bool {
+        let Some(tag) = std::str::from_utf8(signature).ok().and_then(unhex) else {
+            return false;
+        };
+        let sts = format!("{algorithm}\n{}{}\n{hash}", self.prefix, self.previous);
+        if hmac::verify(&self.key, sts.as_bytes(), &tag).is_err() {
+            return false;
+        }
+        self.previous = hex(&tag);
+        true
+    }
+}
+
+/// Strips `aws-chunked` framing (what SDKs send for streamed uploads over TLS). With a signer
+/// every chunk and any trailer must carry a valid signature; without one, signatures are ignored.
 #[derive(Default)]
 struct AwsChunked {
     state: Chunk,
     line: Vec<u8>,
+    signer: Option<ChunkSigner>,
+    /// The client announced signed trailers (`…-PAYLOAD-TRAILER`).
+    signed_trailer: bool,
+    chunk_signature: Option<Vec<u8>>,
+    chunk_hash: Option<digest::Context>,
+    /// `(lowercase name, trimmed value)`, without the trailer signature.
+    trailers: Vec<(String, String)>,
+    trailer_signature: Option<Vec<u8>>,
+    /// A signature did not verify (as opposed to malformed framing).
+    forged: bool,
 }
 
 impl AwsChunked {
@@ -499,6 +538,9 @@ impl AwsChunked {
             match self.state {
                 Chunk::Data(n) => {
                     let take = usize::try_from(n).map_or(input.len(), |n| n.min(input.len()));
+                    if let Some(h) = &mut self.chunk_hash {
+                        h.update(&input[..take]);
+                    }
                     out.extend_from_slice(&input[..take]);
                     input = &input[take..];
                     let left = n - take as u64;
@@ -532,22 +574,161 @@ impl AwsChunked {
     fn on_line(&mut self, line: &[u8]) -> Result<(), ()> {
         self.state = match self.state {
             Chunk::Size => {
-                let size = line.split(|&b| b == b';').next().ok_or(())?;
-                let size = std::str::from_utf8(size).map_err(|_| ())?;
+                let mut fields = line.split(|&b| b == b';');
+                let size = std::str::from_utf8(fields.next().ok_or(())?).map_err(|_| ())?;
                 if size.is_empty() || size.len() > 15 {
                     return Err(());
                 }
+                if self.signer.is_some() {
+                    let sig = fields.find_map(|f| f.strip_prefix(b"chunk-signature="));
+                    self.chunk_signature = Some(sig.ok_or(())?.to_vec());
+                    self.chunk_hash = Some(digest::Context::new(&digest::SHA256));
+                }
                 match u64::from_str_radix(size, 16).map_err(|_| ())? {
-                    0 => Chunk::Trailer,
+                    0 => {
+                        self.end_chunk()?;
+                        Chunk::Trailer
+                    }
                     n => Chunk::Data(n),
                 }
             }
-            Chunk::DataEnd if line.is_empty() => Chunk::Size,
-            Chunk::Trailer if line.is_empty() => Chunk::Done,
-            Chunk::Trailer => Chunk::Trailer,
+            Chunk::DataEnd if line.is_empty() => {
+                self.end_chunk()?;
+                Chunk::Size
+            }
+            Chunk::Trailer if line.is_empty() => {
+                self.end_trailers()?;
+                Chunk::Done
+            }
+            Chunk::Trailer if self.trailers.len() < 16 => {
+                let line = std::str::from_utf8(line).map_err(|_| ())?;
+                let (name, value) = line.split_once(':').ok_or(())?;
+                let name = name.trim().to_ascii_lowercase();
+                if name == "x-amz-trailer-signature" {
+                    self.trailer_signature = Some(value.trim().as_bytes().to_vec());
+                } else {
+                    self.trailers.push((name, value.trim().to_owned()));
+                }
+                Chunk::Trailer
+            }
             _ => return Err(()),
         };
         Ok(())
+    }
+
+    fn end_chunk(&mut self) -> Result<(), ()> {
+        let Some(signer) = &mut self.signer else {
+            return Ok(());
+        };
+        let (Some(sig), Some(hash)) = (self.chunk_signature.take(), self.chunk_hash.take()) else {
+            return Err(());
+        };
+        let hash = format!("{EMPTY_SHA256}\n{}", hex(hash.finish().as_ref()));
+        if !signer.verify("AWS4-HMAC-SHA256-PAYLOAD", &hash, &sig) {
+            self.forged = true;
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn end_trailers(&mut self) -> Result<(), ()> {
+        let Some(signer) = &mut self.signer else {
+            return Ok(());
+        };
+        if self.trailers.is_empty() && self.trailer_signature.is_none() {
+            return Ok(());
+        }
+        // Signed bodies may only carry trailers the client announced as signed.
+        let sig = self
+            .trailer_signature
+            .take()
+            .filter(|_| self.signed_trailer)
+            .ok_or(())?;
+        let mut sorted: Vec<_> = self.trailers.iter().collect();
+        sorted.sort();
+        let canonical: String = sorted.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+        let hash = hex(digest::digest(&digest::SHA256, canonical.as_bytes()).as_ref());
+        if !signer.verify("AWS4-HMAC-SHA256-TRAILER", &hash, &sig) {
+            self.forged = true;
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+// ---- checksums ----
+
+const fn crc_table(poly: u64) -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u64;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 == 1 { (c >> 1) ^ poly } else { c >> 1 };
+            k += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+}
+
+// Reflected polynomials of CRC-32, CRC-32C and CRC-64/NVME.
+static CRC32: [u64; 256] = crc_table(0xEDB8_8320);
+static CRC32C: [u64; 256] = crc_table(0x82F6_3B78);
+static CRC64NVME: [u64; 256] = crc_table(0x9A6C_9329_AC4B_C9B5);
+
+/// An `x-amz-checksum-*` value being computed over the decoded payload.
+enum Checksum {
+    Crc {
+        table: &'static [u64; 256],
+        state: u64,
+        bytes: usize,
+    },
+    Digest(digest::Context),
+}
+
+impl Checksum {
+    fn new(header: &str) -> Option<Self> {
+        let crc = |table, bytes: usize| Checksum::Crc {
+            table,
+            state: u64::MAX >> (64 - 8 * bytes),
+            bytes,
+        };
+        Some(match header {
+            "x-amz-checksum-crc32" => crc(&CRC32, 4),
+            "x-amz-checksum-crc32c" => crc(&CRC32C, 4),
+            "x-amz-checksum-crc64nvme" => crc(&CRC64NVME, 8),
+            "x-amz-checksum-sha1" => {
+                Checksum::Digest(digest::Context::new(&digest::SHA1_FOR_LEGACY_USE_ONLY))
+            }
+            "x-amz-checksum-sha256" => Checksum::Digest(digest::Context::new(&digest::SHA256)),
+            _ => return None,
+        })
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Checksum::Crc { table, state, .. } => {
+                *state = data.iter().fold(*state, |c, &b| {
+                    table[((c ^ u64::from(b)) & 0xff) as usize] ^ (c >> 8)
+                });
+            }
+            Checksum::Digest(d) => d.update(data),
+        }
+    }
+
+    /// Base64 of the big-endian value, as clients send it.
+    fn finish(self) -> String {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        match self {
+            Checksum::Crc { state, bytes, .. } => {
+                let mask = u64::MAX >> (64 - 8 * bytes);
+                b64(&((state ^ mask).to_be_bytes()[8 - bytes..]))
+            }
+            Checksum::Digest(d) => b64(d.finish().as_ref()),
+        }
     }
 }
 
@@ -567,22 +748,23 @@ pub async fn handle(State(st): State<Arc<AppState>>, req: Request) -> Response {
         .await
         .into_response();
     };
-    let caller = match authenticate(&st, &parts.method, &parts.uri, &target, &parts.headers) {
-        Ok(c) => c,
-        Err(e) => return storage::drain(body, e).await.into_response(),
-    };
+    let (caller, signer) =
+        match authenticate(&st, &parts.method, &parts.uri, &target, &parts.headers) {
+            Ok(v) => v,
+            Err(e) => return storage::drain(body, e).await.into_response(),
+        };
     let (has_bucket, has_key) = (!target.bucket.is_empty(), !target.key.is_empty());
     let multipart = target.param("uploadId").is_some();
     // Operations that read the body return directly; the rest leave it unread.
     let with_body = match parts.method {
         Method::PUT if has_key && multipart => {
-            Some(upload_part(&st, &caller, &target, &parts.headers, body).await)
+            Some(upload_part(&st, &caller, &target, &parts.headers, signer, body).await)
         }
         Method::PUT if has_key && parts.headers.contains_key("x-amz-copy-source") => {
             Some(copy_object(&st, &caller, &target, &parts.headers).await)
         }
         Method::PUT if has_key => {
-            Some(put_object(&st, &caller, &target, &parts.headers, body).await)
+            Some(put_object(&st, &caller, &target, &parts.headers, signer, body).await)
         }
         Method::POST if has_key && multipart => {
             Some(complete_multipart(&st, &caller, &target, &parts.headers, body).await)
@@ -937,6 +1119,7 @@ async fn put_object(
     caller: &Caller,
     t: &Target,
     headers: &HeaderMap,
+    signer: Option<ChunkSigner>,
     body: Body,
 ) -> Result<Response, S3Error> {
     let storage = &st.storage;
@@ -963,7 +1146,7 @@ async fn put_object(
         Ok(v) => v,
         Err(e) => return Err(storage::drain(body, e).await),
     };
-    let received = receive_payload(st, headers, body, limit).await?;
+    let received = receive_payload(st, headers, signer, body, limit).await?;
     let object = NewObject {
         bucket: &t.bucket,
         name: &t.key,
@@ -1203,16 +1386,52 @@ fn declared_length(headers: &HeaderMap) -> Option<u64> {
     headers.get(name)?.to_str().ok()?.parse().ok()
 }
 
-/// Streams the body to a temp file, stripping aws-chunked framing and checking a declared SHA-256.
+/// Streams the body to a temp file, stripping aws-chunked framing and checking chunk signatures,
+/// a declared SHA-256 and any `x-amz-checksum-*` (sent as a header or a trailer).
 async fn receive_payload(
     st: &AppState,
     headers: &HeaderMap,
+    signer: Option<ChunkSigner>,
     body: Body,
     limit: u64,
 ) -> Result<storage::Received, S3Error> {
     let (payload, chunked) = payload_mode(headers);
+    let mode = match payload {
+        "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" => Ok(Some(false)),
+        "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER" => Ok(Some(true)),
+        "STREAMING-UNSIGNED-PAYLOAD-TRAILER" => Ok(None),
+        p if p.starts_with("STREAMING-") => Err(not_implemented()),
+        _ => Ok(None),
+    };
+    let checksum_name = match headers.get("x-amz-trailer") {
+        Some(v) => v
+            .to_str()
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| Checksum::new(v).is_some())
+            .map(Some)
+            .ok_or_else(not_implemented),
+        None => Ok(headers
+            .keys()
+            .map(|k| k.as_str().to_owned())
+            .find(|k| Checksum::new(k).is_some())),
+    };
+    let (signed_trailer, checksum_name) = match (mode, checksum_name) {
+        (Ok(Some(_)), _) if signer.is_none() => {
+            return Err(
+                storage::drain(body, denied("presigned requests cannot sign chunks")).await,
+            );
+        }
+        (Ok(m), Ok(c)) => (m, c),
+        (Err(e), _) | (_, Err(e)) => return Err(storage::drain(body, e).await),
+    };
     let expected = (payload.len() == 64).then(|| unhex(payload)).flatten();
-    let mut decoder = chunked.then(AwsChunked::default);
+    let mut decoder = chunked.then(|| AwsChunked {
+        signer: signed_trailer.and(signer),
+        signed_trailer: signed_trailer == Some(true),
+        ..AwsChunked::default()
+    });
+    let mut checksum = checksum_name.as_deref().and_then(Checksum::new);
     let mut hasher = digest::Context::new(&digest::SHA256);
     let received = storage::receive(&st.storage, body, limit, |data| {
         let data = match &mut decoder {
@@ -1222,9 +1441,43 @@ async fn receive_payload(
             None => data,
         };
         hasher.update(&data);
+        if let Some(c) = &mut checksum {
+            c.update(&data);
+        }
         Ok(data)
     })
-    .await?;
+    .await;
+    if decoder.as_ref().is_some_and(|d| d.forged) {
+        return Err(signature_mismatch());
+    }
+    let received = received?;
+    if let (Some(name), Some(sum)) = (&checksum_name, checksum) {
+        let trailer = decoder
+            .as_ref()
+            .and_then(|d| d.trailers.iter().find(|(k, _)| k == name))
+            .map(|(_, v)| v.as_str());
+        let sent = match headers.get(name.as_str()) {
+            Some(v) => v.to_str().ok().map(str::trim),
+            None => trailer,
+        };
+        match sent {
+            None => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "the announced checksum trailer is missing",
+                ));
+            }
+            Some(sent) if sent != sum.finish() => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "BadDigest",
+                    "the payload does not match its x-amz-checksum",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     if decoder.is_some_and(|d| d.state != Chunk::Done) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -1351,6 +1604,7 @@ async fn upload_part(
     caller: &Caller,
     t: &Target,
     headers: &HeaderMap,
+    signer: Option<ChunkSigner>,
     body: Body,
 ) -> Result<Response, S3Error> {
     let checked = async {
@@ -1383,7 +1637,7 @@ async fn upload_part(
         None
     };
     let received = match &copied {
-        None => receive_payload(st, headers, body, limit).await?,
+        None => receive_payload(st, headers, signer, body, limit).await?,
         // UploadPartCopy: the part is (a range of) a stored object instead of the body.
         Some(src) => {
             let (start, len) = match headers.get("x-amz-copy-source-range") {
@@ -1651,6 +1905,104 @@ mod tests {
         assert_eq!(completed_parts(body), Some(vec![1, 2]));
         assert_eq!(completed_parts("<CompleteMultipartUpload/>"), Some(vec![]));
         assert_eq!(completed_parts("<PartNumber>x</PartNumber>"), None);
+    }
+
+    /// The 65 KiB example AWS publishes for streaming SigV4, with and without a signed trailer.
+    fn signed_body(seed: &str, chunks: [&str; 3], trailer: &str) -> (AwsChunked, Vec<u8>) {
+        let decoder = AwsChunked {
+            signer: Some(ChunkSigner {
+                key: signing_key(SECRET, "20130524", "us-east-1"),
+                prefix: "20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n".to_owned(),
+                previous: seed.to_owned(),
+            }),
+            signed_trailer: !trailer.is_empty(),
+            ..AwsChunked::default()
+        };
+        let mut body = format!("10000;chunk-signature={}\r\n", chunks[0]).into_bytes();
+        body.extend_from_slice(&[b'a'; 65536]);
+        body.extend_from_slice(format!("\r\n400;chunk-signature={}\r\n", chunks[1]).as_bytes());
+        body.extend_from_slice(&[b'a'; 1024]);
+        body.extend_from_slice(format!("\r\n0;chunk-signature={}\r\n", chunks[2]).as_bytes());
+        body.extend_from_slice(trailer.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        (decoder, body)
+    }
+
+    const PLAIN: (&str, [&str; 3]) = (
+        "4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9",
+        [
+            "ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648",
+            "0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497",
+            "b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9",
+        ],
+    );
+    const TRAILED: (&str, [&str; 3]) = (
+        "106e2a8a18243abcf37539882f36619c00e2dfc72633413f02d3b74544bfeb8e",
+        [
+            "b474d8862b1487a5145d686f57f013e54db672cee1c953b3010fb58501ef5aa2",
+            "1c1344b170168f8e65b41376b44b20fe354e373826ccbbe2c1d40a8cae51e5c7",
+            "2ca2aba2005185cf7159c6277faf83795951dd77a3a99e6e65d5c9f85863f992",
+        ],
+    );
+    const TRAILER: &str = "x-amz-checksum-crc32c:sOO8/Q==\r\nx-amz-trailer-signature:d81f82fc3505edab99d459891051a732e8730629a2e4a59689829ca17fe2e435\r\n";
+
+    #[test]
+    fn verifies_aws_streaming_examples() {
+        for ((seed, chunks), trailer) in [(PLAIN, ""), (TRAILED, TRAILER)] {
+            let (mut d, body) = signed_body(seed, chunks, trailer);
+            assert_eq!(d.feed(&body).unwrap().len(), 66560);
+            assert_eq!(d.state, Chunk::Done);
+        }
+
+        // Any changed byte, signature or trailer breaks the chain.
+        let (mut d, mut body) = signed_body(PLAIN.0, PLAIN.1, "");
+        body[100] = b'b';
+        assert!(d.feed(&body).is_err() && d.forged);
+        let mut last = PLAIN.1;
+        last[2] = TRAILED.1[2];
+        let (mut d, body) = signed_body(PLAIN.0, last, "");
+        assert!(d.feed(&body).is_err() && d.forged);
+        let forged = TRAILER.replace("sOO8", "sOO9");
+        let (mut d, body) = signed_body(TRAILED.0, TRAILED.1, &forged);
+        assert!(d.feed(&body).is_err() && d.forged);
+        // Unsigned chunks and trailers the client did not announce as signed are refused.
+        let (mut d, body) = signed_body(PLAIN.0, PLAIN.1, "x-amz-checksum-crc32:AAAAAA==\r\n");
+        assert!(d.feed(&body).is_err());
+        let mut d = AwsChunked {
+            signer: signed_body(PLAIN.0, PLAIN.1, "").0.signer,
+            ..AwsChunked::default()
+        };
+        assert!(d.feed(b"5\r\nhello\r\n").is_err());
+    }
+
+    #[test]
+    fn checksums_match_their_check_values() {
+        let sum = |name: &str, data: &[u8]| {
+            let mut c = Checksum::new(name).unwrap();
+            let (head, tail) = data.split_at(data.len().min(3));
+            c.update(head);
+            c.update(tail);
+            c.finish()
+        };
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        assert_eq!(
+            sum("x-amz-checksum-crc32", b"123456789"),
+            b64(&0xCBF4_3926u32.to_be_bytes())
+        );
+        assert_eq!(
+            sum("x-amz-checksum-crc32c", b"123456789"),
+            b64(&0xE306_9283u32.to_be_bytes())
+        );
+        assert_eq!(
+            sum("x-amz-checksum-crc64nvme", b"123456789"),
+            b64(&0xAE8B_1486_0A79_9888u64.to_be_bytes())
+        );
+        assert_eq!(sum("x-amz-checksum-crc32c", &[b'a'; 66560]), "sOO8/Q==");
+        assert_eq!(
+            sum("x-amz-checksum-sha256", b""),
+            b64(&unhex(EMPTY_SHA256).unwrap())
+        );
+        assert!(Checksum::new("x-amz-checksum-md5").is_none());
     }
 
     #[test]
