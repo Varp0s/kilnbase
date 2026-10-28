@@ -71,6 +71,7 @@ services:
     volumes: !override
       - ./tests/functions:/functions:ro
       - functions-deps:/deps
+      - logs-functions:/logs
 
   graphql:
     profiles: !reset []
