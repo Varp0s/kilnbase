@@ -235,6 +235,23 @@ CRON_ACTIONS = {
     "delete": "select cron.unschedule(jobid) from cron.job where jobname = $1",
 }
 
+QUEUES_ENABLED_SQL = "select exists (select from pg_extension where extname = 'pgmq')"
+QUEUES_SQL = """
+select q.queue_name as name, q.created_at, q.is_unlogged,
+       m.queue_length, m.total_messages, m.oldest_msg_age_sec
+  from pgmq.list_queues() q join pgmq.metrics_all() m using (queue_name)
+ order by q.queue_name
+"""
+QUEUE_ACTIONS = {
+    "purge": "select pgmq.purge_queue($1)",
+    "delete": "select pgmq.drop_queue($1)",
+}
+
+
+class NewQueue(BaseModel):
+    # pgmq prefixes q_ / a_ to the name for its tables, which caps it at 47 characters.
+    name: str = Field(pattern=r"^[a-z0-9_]{1,47}$")
+
 
 class NewCronJob(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -563,6 +580,71 @@ def create_app(config: Config) -> FastAPI:
                 return error(404, "not_found", "no such job")
             if not await conn.fetch(sql, name):
                 return error(404, "not_found", "no such job")
+        return {"ok": True}
+
+    async def queue_exists(conn, name: str) -> bool:
+        return bool(
+            await conn.fetchval(QUEUES_ENABLED_SQL)
+            and await conn.fetchval("select 1 from pgmq.list_queues() where queue_name = $1", name)
+        )
+
+    @app.get("/api/queues", dependencies=[Depends(admin)])
+    async def queues():
+        async with app.state.pool.acquire() as conn:
+            if not await conn.fetchval(QUEUES_ENABLED_SQL):
+                return {"enabled": False, "queues": []}
+            return {"enabled": True, "queues": [dict(r) for r in await conn.fetch(QUEUES_SQL)]}
+
+    @app.post("/api/queues", dependencies=[Depends(admin)])
+    async def create_queue(body: NewQueue):
+        async with app.state.pool.acquire() as conn:
+            if not await conn.fetchval(QUEUES_ENABLED_SQL):
+                return error(409, "conflict", "enable the pgmq extension first")
+            if await queue_exists(conn, body.name):
+                return error(409, "conflict", "a queue with that name exists")
+            try:
+                await conn.execute("select pgmq.create($1)", body.name)
+            except asyncpg.PostgresError as e:
+                return error(400, "database_error", str(e))
+        return {"ok": True}
+
+    @app.get("/api/queues/{name}/messages", dependencies=[Depends(admin)])
+    async def queue_messages(name: str):
+        """A peek at the table: unlike pgmq.read, it neither hides messages nor counts a read."""
+        async with app.state.pool.acquire() as conn:
+            if not await queue_exists(conn, name):
+                return error(404, "not_found", "no such queue")
+            table = await conn.fetchval("select quote_ident('q_' || $1)", name)
+            rows = await conn.fetch(
+                # The name is an existing queue's, quoted by Postgres.
+                "select msg_id, read_ct, enqueued_at, vt, message::text as message"  # noqa: S608
+                f" from pgmq.{table} order by msg_id limit 50"
+            )
+        return [dict(r) | {"message": cell(r["message"])} for r in rows]
+
+    @app.post("/api/queues/{name}/messages", dependencies=[Depends(admin)])
+    async def send_message(name: str, request: Request):
+        try:
+            message = await request.json()
+        except ValueError:
+            return error(400, "invalid_request", "the body is the message, as JSON")
+        async with app.state.pool.acquire() as conn:
+            if not await queue_exists(conn, name):
+                return error(404, "not_found", "no such queue")
+            msg_id = await conn.fetchval(
+                "select pgmq.send($1, $2::jsonb)", name, json.dumps(message)
+            )
+        return {"msg_id": msg_id}
+
+    @app.post("/api/queues/{name}/{action}", dependencies=[Depends(admin)])
+    async def queue_action(name: str, action: str):
+        sql = QUEUE_ACTIONS.get(action)
+        if sql is None:
+            return error(400, "invalid_request", "action is purge or delete")
+        async with app.state.pool.acquire() as conn:
+            if not await queue_exists(conn, name):
+                return error(404, "not_found", "no such queue")
+            await conn.execute(sql, name)
         return {"ok": True}
 
     @app.post("/api/view-as", dependencies=[Depends(admin)])

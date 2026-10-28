@@ -19,6 +19,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   schema where they allow it.
 - **Studio**: Connect page (API URL, anon key, client snippets) and "Enable RLS" / "Add policy" shortcuts that
   open the SQL editor with a statement to review.
+- **Studio**: queues page (create, purge and delete pgmq queues; send a message; peek at messages without
+  consuming them).
 - **Studio**: cron jobs page (schedule SQL with pg_cron, enable, disable, delete; the newest runs). A name that
   is taken is refused rather than silently replaced.
 - **Logs**: core, auth, functions and Studio also write their JSON log lines to a per-service volume (10 MB,

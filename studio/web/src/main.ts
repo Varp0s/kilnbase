@@ -44,6 +44,7 @@ const ICONS: Record<string, string[]> = {
   copy: ["M9 9h11v11H9z", "M5 15V5a1 1 0 0 1 1-1h9"],
   table: ["M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 10h18M9 10v10"],
   users: ["M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M2 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1", "M16 3.5a4 4 0 0 1 0 8M22 20v-1a5 5 0 0 0-3.5-4.8"],
+  inbox: ["M3 13l3-8h12l3 8v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z", "M3 13h5l1 3h6l1-3h5"],
   clock: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 7v5l3 2"],
   bolt: ["M13 2L4 14h7l-1 8 9-12h-7z"],
   alert: ["M12 3l10 18H2z", "M12 10v5M12 18h.01"],
@@ -123,6 +124,8 @@ interface CronJob {
 }
 interface CronRun { runid: number; job: string; status: string; return_message: string | null; start_time: string | null; end_time: string | null }
 interface CronInfo { enabled: boolean; jobs: CronJob[]; runs: CronRun[] }
+interface Queue { name: string; created_at: string; is_unlogged: boolean; queue_length: number; total_messages: number; oldest_msg_age_sec: number | null }
+interface QueueMessage { msg_id: number; read_ct: number; enqueued_at: string; vt: string; message: string }
 interface Extension { name: string; default_version: string; installed_version: string | null; comment: string | null; schema: string | null }
 interface DatabaseInfo {
   version: string; bytes: number; connections: number; max_connections: number; tables: number;
@@ -719,6 +722,83 @@ const views: Record<string, () => Promise<Node[]>> = {
       grid(["id", "webhook", "status", "attempts", "HTTP", "last error", "queued", ""], deliveryRows, "No deliveries yet."),
     ];
   },
+  async queues() {
+    const info = await api<{ enabled: boolean; queues: Queue[] }>("/api/queues");
+    const message = el("p", { className: "hint" });
+    if (!info.enabled) {
+      const enable = el("button", { type: "button" }, "Enable pgmq");
+      enable.addEventListener("click", () => {
+        api("/api/extensions/pgmq/enable", {}).then(() => { toast("pgmq enabled"); void show("queues"); })
+          .catch((err: unknown) => fail(err, message));
+      });
+      return [emptyState(icon("inbox"), "pgmq is not enabled", "Queues need the pgmq extension."), enable, message];
+    }
+    const messages = el("div");
+    const act = async (name: string, action: string, title: string, question: string) => {
+      if (!(await confirmDialog(title, question, { confirmLabel: action === "delete" ? "Delete" : "Purge", danger: true }))) return;
+      api(`/api/queues/${encodeURIComponent(name)}/${action}`, {}).then(() => { toast("Done"); void show("queues"); })
+        .catch((err: unknown) => fail(err, message));
+    };
+    const browse = async (name: string) => {
+      const list = await api<QueueMessage[]>(`/api/queues/${encodeURIComponent(name)}/messages`);
+      const body = el("textarea", { id: "queue-message", rows: 3, spellcheck: false, value: '{"hello": "world"}' });
+      const sendMessage = el("div");
+      const send = el("form", {},
+        el("label", { htmlFor: "queue-message" }, `Send to ${name} (JSON)`), body, el("button", { type: "submit" }, "Send"));
+      send.addEventListener("submit", (e) => {
+        e.preventDefault();
+        let parsed: Json;
+        try { parsed = JSON.parse(body.value) as Json; } catch { return fail(new Error("The message is not valid JSON."), sendMessage); }
+        api<{ msg_id: number }>(`/api/queues/${encodeURIComponent(name)}/messages`, parsed)
+          .then((r) => { toast(`Message ${r.msg_id} sent`); void browse(name); })
+          .catch((err: unknown) => fail(err, sendMessage));
+      });
+      const rows = list.map((m) => el("tr", {},
+        el("td", {}, String(m.msg_id)), el("td", {}, String(m.read_ct)),
+        el("td", { title: m.enqueued_at }, new Date(m.enqueued_at).toLocaleString()),
+        el("td", { title: m.vt }, Date.parse(m.vt) > Date.now() ? el("span", { className: "hint" }, "hidden until " + new Date(m.vt).toLocaleTimeString()) : "visible"),
+        el("td", {}, el("code", {}, m.message))));
+      messages.replaceChildren(
+        el("h2", {}, `Messages in ${name}`),
+        el("p", { className: "hint" }, "The oldest 50, peeked: reading them here neither hides them nor counts as a read."),
+        rows.length ? el("div", { className: "scroll" }, el("table", {},
+          el("thead", {}, el("tr", {}, ...["id", "reads", "enqueued", "visibility", "message"].map((h) => el("th", {}, h)))),
+          el("tbody", {}, ...rows))) : emptyState(icon("inbox"), "The queue is empty."),
+        send, sendMessage);
+    };
+
+    const queueRows = info.queues.map((q) => {
+      const open = el("button", { type: "button" }, "Messages");
+      open.addEventListener("click", () => void browse(q.name).catch((err: unknown) => fail(err, message)));
+      const purge = el("button", { type: "button" }, "Purge");
+      purge.addEventListener("click", () => void act(q.name, "purge", "Purge queue?", `Delete every message in ${q.name}?`));
+      const del = el("button", { type: "button", className: "danger" }, "Delete");
+      del.addEventListener("click", () => void act(q.name, "delete", "Delete queue?", `Drop ${q.name}, its messages and its archive?`));
+      return el("tr", {},
+        el("td", {}, q.name), el("td", {}, String(q.queue_length)), el("td", {}, String(q.total_messages)),
+        el("td", {}, q.oldest_msg_age_sec === null ? "" : `${q.oldest_msg_age_sec} s`),
+        el("td", { title: q.created_at }, new Date(q.created_at).toLocaleString()),
+        el("td", { className: "actions" }, open, purge, del));
+    });
+
+    const name = el("input", { id: "queue-name", required: true, pattern: "[a-z0-9_]{1,47}", placeholder: "emails" });
+    const formMessage = el("div");
+    const create = el("form", {},
+      el("label", { htmlFor: "queue-name" }, "New queue"), name, el("button", { type: "submit" }, "Create"));
+    create.addEventListener("submit", (e) => {
+      e.preventDefault();
+      api("/api/queues", { name: name.value }).then(() => { toast(`Queue ${name.value} created`); void show("queues"); })
+        .catch((err: unknown) => fail(err, formMessage));
+    });
+    return [
+      create, formMessage, message,
+      el("h2", {}, "Queues"),
+      queueRows.length ? el("div", { className: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ...["name", "waiting", "sent in total", "oldest", "created", ""].map((h) => el("th", {}, h)))),
+        el("tbody", {}, ...queueRows))) : emptyState(icon("inbox"), "No queues yet."),
+      messages,
+    ];
+  },
   async cron() {
     const info = await api<CronInfo>("/api/cron");
     const message = el("p", { className: "hint" });
@@ -806,6 +886,7 @@ const SUBTITLES: Record<string, string> = {
   users: "Everyone who can sign in.",
   viewas: "See a table exactly as one user, or anon, sees it through the API.",
   storage: "Buckets and the files in them.",
+  queues: "Message queues, with pgmq.",
   cron: "SQL that runs on a schedule, with pg_cron.",
   webhooks: "HTTP calls fired by table changes, and their delivery log.",
   logs: "Recent log lines from the Kilnbase services.",

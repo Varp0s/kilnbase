@@ -91,6 +91,8 @@ use an SSH tunnel to reach it from another machine.
 - **Connect**: the API URL, the anon key and client snippets.
 - **Webhooks**: create (the signing secret is shown once), enable, disable and delete webhooks; the newest
   deliveries with status and last error, and a retry for failed ones.
+- **Queues**: create, purge and delete pgmq queues, send a JSON message, and peek at the oldest 50 messages
+  (peeking neither hides them nor counts as a read).
 - **Cron jobs**: schedule SQL with pg_cron (enabled from the page if it is not yet), enable, disable and delete
   jobs, and see the newest runs with their status and message. Jobs created here run as the database superuser.
 

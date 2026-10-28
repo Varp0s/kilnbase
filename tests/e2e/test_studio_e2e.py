@@ -1,3 +1,4 @@
+import json
 import time
 import uuid
 
@@ -348,6 +349,44 @@ def test_cron_jobs(keys):
         httpx.post(f"{STUDIO}/api/cron/{name}/delete", headers=h)
         if not was_enabled:
             httpx.post(f"{STUDIO}/api/extensions/pg_cron/disable", headers=h)
+
+
+def test_queues(keys):
+    h = admin(keys)
+    was_enabled = httpx.get(f"{STUDIO}/api/queues", headers=h).json()["enabled"]
+    if not was_enabled:
+        assert httpx.post(f"{STUDIO}/api/queues", headers=h, json={"name": "x"}).status_code == 409
+        assert httpx.post(f"{STUDIO}/api/extensions/pgmq/enable", headers=h).status_code == 200
+    name = f"e2e_{uuid.uuid4().hex[:8]}"
+    q = f"{STUDIO}/api/queues/{name}"
+    try:
+        assert httpx.post(f"{STUDIO}/api/queues", headers=h, json={"name": name}).status_code == 200
+        assert httpx.post(f"{STUDIO}/api/queues", headers=h, json={"name": name}).status_code == 409
+        bad = httpx.post(f"{STUDIO}/api/queues", headers=h, json={"name": "Bad-Name"})
+        assert bad.status_code == 422
+
+        r = httpx.post(f"{q}/messages", headers=h, json={"n": 1})
+        assert r.status_code == 200 and isinstance(r.json()["msg_id"], int)
+        # A peek, so the message stays readable and unread.
+        for _ in range(2):
+            messages = httpx.get(f"{q}/messages", headers=h).json()
+            assert [(m["read_ct"], json.loads(m["message"])) for m in messages] == [(0, {"n": 1})]
+        listed = next(
+            x
+            for x in httpx.get(f"{STUDIO}/api/queues", headers=h).json()["queues"]
+            if x["name"] == name
+        )
+        assert listed["queue_length"] == 1
+
+        assert httpx.post(f"{q}/purge", headers=h).status_code == 200
+        assert httpx.get(f"{q}/messages", headers=h).json() == []
+        assert httpx.post(f"{q}/rename", headers=h).status_code == 400
+        assert httpx.post(f"{q}/delete", headers=h).status_code == 200
+        assert httpx.get(f"{q}/messages", headers=h).status_code == 404
+    finally:
+        httpx.post(f"{q}/delete", headers=h)
+        if not was_enabled:
+            httpx.post(f"{STUDIO}/api/extensions/pgmq/disable", headers=h)
 
 
 def test_connect_page_shows_only_public_values(keys):
