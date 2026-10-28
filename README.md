@@ -37,6 +37,22 @@ claims; anon without a user token). Return a body (dict/list → JSON, `str` →
 `(body, status)` or `(body, status, headers)`. Inside, `KILNBASE_URL` and `KILNBASE_ANON_KEY` let a function call
 the API; forward the caller's `Authorization` header to act as them.
 
+A function can be TypeScript instead: `functions/<name>/main.ts` runs on Node 24 (types are stripped, not
+checked, so syntax that needs compiling, such as `enum`, is refused), with the same `request` (`body` is a `Uint8Array`). Return a body as above, or a `Response` for your own
+status and headers:
+
+```ts
+// functions/hello-ts/main.ts
+export async function handler(request: { query: Record<string, string>; user: { role: string } }) {
+  return Response.json({ message: `Hello, ${request.query.name ?? "world"}!` }, { status: 200 });
+}
+```
+
+The memory limit bounds the JS heap and everything else the function allocates (V8 reserves about 1.2 GB of
+address space up front, which is added to the limit and never used). Worker threads are not available, and a
+function that fills its heap is ended by the time limit, as Node takes seconds to exit. npm packages are not
+installed yet.
+
 Every call runs in its own [nsjail](https://github.com/google/nsjail) sandbox: separate user, PID and mount
 namespaces, a read-only root without the other functions, a private `/tmp`, a syscall filter that blocks new
 namespaces, `ptrace`, `bpf`, `io_uring` and similar, and limits on time (10 s), memory (256 MB), processes and
@@ -504,7 +520,7 @@ tokens travel there.
 | `core` | Rust | Gateway (API keys, JWT verification, rate limiting), storage, realtime |
 | `auth` | Python | Sign-up, sign-in, tokens; the only holder of the signing key |
 | `postgrest` | PostgREST | Auto-generated REST API, reachable only through `core` |
-| `functions` (optional) | Python + nsjail | Runs `functions/<name>/main.py`, one sandbox per call |
+| `functions` (optional) | Python + nsjail | Runs `functions/<name>/main.py` or `main.ts` (Node), one sandbox per call |
 | `studio` (optional) | Python + TS | Admin dashboard on 127.0.0.1:3001 |
 | `db` | PostgreSQL 18 | Data, row level security; ships pgvector, pg_cron and pgmq (`postgres/Dockerfile`) |
 

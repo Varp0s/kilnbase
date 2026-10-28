@@ -66,7 +66,7 @@ feature; `CHANGELOG.md` says when it arrived and lists known limitations.
 | Feature | Status | Notes |
 |---|---|---|
 | Python functions | ✅ | One nsjail sandbox per call, per-function secrets, wheels-only dependencies |
-| TypeScript functions | 🗓 | |
+| TypeScript functions | 🟡 | Node 24 in the same sandbox; npm packages are not installed yet |
 
 ## Tools
 

@@ -34,6 +34,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   is taken is refused rather than silently replaced.
 - **Logs**: core, auth, functions and Studio also write their JSON log lines to a per-service volume (10 MB,
   one rotation); Studio reads them read-only. Postgres, PostgREST and imgproxy still log to stderr only.
+- **Functions**: TypeScript functions (`functions/<name>/main.ts`) on Node 24, in the same per-call sandbox as
+  Python ones, returning a body or a `Response`.
 - **S3 API**: CopyObject and UploadPartCopy (within or across buckets, metadata `COPY` or `REPLACE`, ETag
   preconditions), so boto3's managed `copy()` works at any size, and DeleteObjects (up to 1000 keys). RLS
   decides as the caller: a copy needs read access to the source and write access to the target.

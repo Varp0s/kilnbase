@@ -88,6 +88,31 @@ def test_runaway_functions_are_contained(client, keys, what, status):
     assert call(client, keys, "whoami").status_code == 201  # the next call is unaffected
 
 
+def test_typescript_functions(client, keys):
+    r = client.post("/functions/v1/node", headers={"apikey": keys.anon}, content=b"ping")
+    assert r.status_code == 201, r.text
+    assert r.headers["x-runtime"] == "node"
+    assert r.json() == {"role": "anon", "sub": None, "echo": "ping"}  # console.log did not leak in
+
+    r = call(client, keys, "node", what="bytes")
+    assert (r.status_code, r.content) == (200, b"\x00\x01\x02")
+    assert r.headers["content-type"] == "application/octet-stream"
+    r = call(client, keys, "node", what="throw")
+    assert r.status_code == 500 and "boom" not in r.text
+
+    env = call(client, keys, "node", what="env").json()
+    assert set(env) == {"KILNBASE_URL", "KILNBASE_ANON_KEY", "HOME", "LANG", "PATH", "SHARED"}
+    files = call(client, keys, "node", what="files").json()
+    assert files == {"root_writable": False, "functions": [], "cwd": ["main.ts"]}
+
+
+# Node takes seconds to exit once its heap is full, so the time limit is what ends that call.
+@pytest.mark.parametrize(("what", "status"), [("loop", 504), ("memory", 500), ("heap", 504)])
+def test_runaway_typescript_functions_are_contained(client, keys, what, status):
+    assert call(client, keys, "node", what=what).status_code == status
+    assert call(client, keys, "node").status_code == 201
+
+
 def test_packages_from_requirements_are_importable(client, keys):
     r = call(client, keys, "deps")
     assert r.status_code == 200, r.text

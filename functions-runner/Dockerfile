@@ -20,6 +20,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=nsjail /nsjail/nsjail /usr/local/bin/nsjail
 COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
+# Runs functions written in TypeScript (type stripping is built in).
+COPY --from=node:24.22.1-trixie-slim /usr/local/bin/node /usr/local/bin/node
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml uv.lock ./

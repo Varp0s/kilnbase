@@ -34,8 +34,14 @@ def create_app(config: Config) -> FastAPI:
     async def invoke(name: str, request: Request) -> Response:
         # Checked before touching the filesystem; the path is never built from anything else.
         function_dir = config.functions_dir / name
-        if not NAME.fullmatch(name) or not (function_dir / "main.py").is_file():
+        if not NAME.fullmatch(name):
             return error(404, "not_found", "no such function")
+        entries = [e for e in ("main.py", "main.ts") if (function_dir / e).is_file()]
+        if not entries:
+            return error(404, "not_found", "no such function")
+        if len(entries) > 1:
+            log.warning("function %s has both main.py and main.ts", name)
+            return error(500, "function_error", "the function has both main.py and main.ts")
         try:
             claims = caller(
                 config.keys, request.headers.get("apikey"), request.headers.get("authorization")

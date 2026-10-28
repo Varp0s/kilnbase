@@ -9,6 +9,10 @@ from .config import Config
 HERE = Path(__file__).parent
 POLICY = (HERE / "policy.kafel").read_text()
 BOOTSTRAP = HERE / "bootstrap.py"
+NODE_BOOTSTRAP = HERE / "bootstrap.mjs"
+# V8 reserves about 1.2 GB of address space at start (most of it never touched), so a TypeScript
+# function's address-space limit is this plus its memory budget.
+NODE_RESERVED_MB = 1280
 RESPONSE_LIMIT = 6 * 1024 * 1024  # base64 of a 4 MiB body plus headers
 LOG_LIMIT = 16 * 1024
 JAIL_TMP = "/tmp"  # noqa: S108 - a private tmpfs inside each jail
@@ -56,7 +60,7 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
     The network namespace is shared so functions can reach the gateway and the internet, which
     is why the compose network gives this container no route to the database or internal services.
     Nothing from this service's environment is passed in, only the variables listed here and the
-    function's own entries from functions/.secrets.
+    function's own entries from functions/.secrets. A `main.ts` runs on Node, a `main.py` on Python.
     """
     # Secrets first, so they can never replace the variables below.
     env = secrets(config.functions_dir, function_dir.name) | {
@@ -66,6 +70,18 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "LANG": "C.UTF-8",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
     }
+    if (function_dir / "main.ts").is_file():
+        memory_mb = NODE_RESERVED_MB + config.memory_mb
+        command = [
+            "/usr/local/bin/node", "--disable-warning=ExperimentalWarning",
+            f"--max-old-space-size={config.memory_mb}", str(NODE_BOOTSTRAP), str(response_fd),
+        ]  # fmt: skip
+    else:
+        memory_mb = config.memory_mb
+        command = [
+            "/usr/local/bin/python3", "-I", "-B", str(BOOTSTRAP), str(response_fd),
+            *([DEPS_MOUNT] if config.deps_dir else []),
+        ]  # fmt: skip
     return [
         "nsjail", "-Mo", "-Q",
         "--chroot", "/",
@@ -81,7 +97,7 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "--cwd", MOUNT,
         "--time_limit", str(config.timeout),
         "--rlimit_cpu", str(config.timeout),
-        "--rlimit_as", str(config.memory_mb),
+        "--rlimit_as", str(memory_mb),
         "--rlimit_nproc", "64",
         "--rlimit_fsize", "16",
         "--rlimit_nofile", "128",
@@ -89,8 +105,7 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "--pass_fd", str(response_fd),
         *(arg for k, v in env.items() for arg in ("--env", f"{k}={v}")),
         "--",
-        "/usr/local/bin/python3", "-I", "-B", str(BOOTSTRAP), str(response_fd),
-        *([DEPS_MOUNT] if config.deps_dir else []),
+        *command,
     ]  # fmt: skip
 
 

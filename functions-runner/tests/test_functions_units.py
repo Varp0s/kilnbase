@@ -83,3 +83,24 @@ def test_secrets_are_scoped_to_their_function(tmp_path):
     )
     assert secrets(tmp_path, "a") == {"TOKEN": "x=y", "SHARED": "1"}
     assert secrets(tmp_path, "c") == {"TOKEN": "default", "SHARED": "1"}
+
+
+def test_typescript_functions_run_on_node_with_room_for_v8(tmp_path):
+    from dataclasses import replace
+
+    from kilnbase_functions.jail import NODE_RESERVED_MB, argv
+
+    config = replace(load(ENV), functions_dir=tmp_path, memory_mb=256)
+    (tmp_path / "py").mkdir()
+    (tmp_path / "py" / "main.py").write_text("")
+    (tmp_path / "ts").mkdir()
+    (tmp_path / "ts" / "main.ts").write_text("")
+
+    def limit(args):
+        return args[args.index("--rlimit_as") + 1]
+
+    py, ts = argv(config, tmp_path / "py", 5), argv(config, tmp_path / "ts", 5)
+    assert py[py.index("--") + 1] == "/usr/local/bin/python3" and limit(py) == "256"
+    assert ts[ts.index("--") + 1] == "/usr/local/bin/node" and "--max-old-space-size=256" in ts
+    assert limit(ts) == str(NODE_RESERVED_MB + 256)
+    assert ts[-2].endswith("bootstrap.mjs") and ts[-1] == "5"
