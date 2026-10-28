@@ -306,7 +306,10 @@ hook, texts are printed to the auth log for local development. JS: `kb.auth.sign
 `kb.auth.verifyOtp({ type: "sms", phone, token })`; Python: `sign_in_with_otp(phone=...)`.
 A signed-in user adds or changes their number with `PUT /auth/v1/user {"phone", "current_password"}` (the
 password only if the account has one), then `POST /auth/v1/user/phone/verify {"token"}` with the texted code;
-other sessions are signed out. This also keeps an anonymous user's account with just a phone.
+other sessions are signed out. This also keeps an anonymous user's account with just a phone. JS:
+`kb.auth.updateUser({ phone, currentPassword })` then `kb.auth.confirmPhoneChange(code)`; email changes work the
+same with `updateUser({ email, currentPassword })` and `confirmEmailChange(code)` (Python: `update_user(...)`,
+`confirm_phone_change`, `confirm_email_change`).
 
 **Email confirmation and password reset.** With SMTP configured, password sign-ups get a confirmation mail
 (`POST /auth/v1/verify {"type":"signup", ...}`); access tokens carry `email_verified`, so a policy can require it:

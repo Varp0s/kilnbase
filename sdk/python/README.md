@@ -48,7 +48,7 @@ client.close()  # also stops the realtime thread
 ```
 
 More, same as the JS client: `upsert`, `ilike`, `is_`, `range` on queries; `sign_in_anonymously`,
-`update_user`, `sign_in_with_otp` / `verify_otp` (code or magic link), `sign_in_with_oauth` +
+`update_user` + `confirm_email_change` / `confirm_phone_change`, `sign_in_with_otp` / `verify_otp` (code or magic link), `sign_in_with_oauth` +
 `exchange_code_for_session` (PKCE), `auth.mfa.enroll/verify/unenroll`; and
 `download(path, transform={"width": 200})` / `get_public_url(path, transform=...)` for images.
 

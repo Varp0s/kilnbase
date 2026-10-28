@@ -12,6 +12,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   `signInWithOtp` / `verifyOtp`. Signed-in users add or change their number with a texted code
   (`PUT /auth/v1/user {"phone"}`, then `POST /auth/v1/user/phone/verify`), which also lets an anonymous user
   keep their account with just a phone.
+- **Clients**: the JS and Python clients change a user's email or phone (`updateUser({ email | phone })`, then
+  `confirmEmailChange` / `confirmPhoneChange`); `password` is no longer required by `updateUser`.
 - **Studio**: table editor (browse rows a page at a time; insert, edit and delete rows of tables with a primary
   key, as service_role).
 - **Studio**: SQL editor (runs as the database superuser in one transaction, optionally rolled back; first

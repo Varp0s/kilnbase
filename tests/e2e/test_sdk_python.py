@@ -318,3 +318,18 @@ def test_phone_sign_in(keys):
     session = kb.auth.verify_otp("sms", latest_code(phone), phone=phone)
     assert session["user"]["phone"] == phone
     assert kb.auth.get_user()["phone"] == phone
+
+
+def test_phone_and_email_change(keys, user):
+    phone = number()
+    user.auth.update_user(phone=phone, current_password=PASSWORD)
+    session = user.auth.confirm_phone_change(latest_code(phone))
+    assert session["user"]["phone"] == phone
+
+    mailpit_up()
+    addr = email()
+    user.auth.update_user(email=addr, current_password=PASSWORD)
+    code = re.search(r"\b(\d{6})\b", latest_mail(addr)).group(1)
+    session = user.auth.confirm_email_change(code)
+    assert session["user"]["email"] == addr
+    assert user.auth.get_user()["email"] == addr

@@ -82,20 +82,57 @@ export class AuthClient {
   }
 
   /**
-   * Changes the password (send `currentPassword`, unless signed in through a password reset), or turns an
-   * anonymous user into a permanent one when `email` is given. Other sessions are signed out.
+   * One change at a time; `currentPassword` is needed when the account has a password (unless signed in through
+   * a password reset).
+   * - `password`: changes it and signs out other sessions.
+   * - `email` and `password` on an anonymous user: makes the account permanent.
+   * - `email` or `phone`: sends a code to the new address or number; nothing changes until it is passed to
+   *   `confirmEmailChange` / `confirmPhoneChange`.
    */
-  async updateUser(changes: { password: string; currentPassword?: string; email?: string }): Promise<Result<null>> {
+  async updateUser(changes: {
+    password?: string;
+    currentPassword?: string;
+    email?: string;
+    phone?: string;
+  }): Promise<Result<null>> {
     const res = await this.#authed("/auth/v1/user", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: changes.password, current_password: changes.currentPassword, email: changes.email }),
+      body: JSON.stringify({
+        password: changes.password,
+        current_password: changes.currentPassword,
+        email: changes.email,
+        phone: changes.phone,
+      }),
     });
     if ("error" in res) return { data: null, error: res.error };
     if (!res.ok) return toError(res);
     // An upgrade returns a fresh session (the anonymous flag is gone from the token).
     if (res.status === 200) await this.#set((await res.json()) as Session, "TOKEN_REFRESHED");
     return ok(null);
+  }
+
+  /** Applies a pending email change with the code sent to the new address; other sessions are signed out. */
+  confirmEmailChange(token: string): Promise<Result<Session>> {
+    return this.#confirm("/auth/v1/user/email/verify", token);
+  }
+
+  /** Applies a pending phone change with the texted code; other sessions are signed out. */
+  confirmPhoneChange(token: string): Promise<Result<Session>> {
+    return this.#confirm("/auth/v1/user/phone/verify", token);
+  }
+
+  async #confirm(path: string, token: string): Promise<Result<Session>> {
+    const res = await this.#authed(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    if ("error" in res) return { data: null, error: res.error };
+    if (!res.ok) return toError(res);
+    const session = (await res.json()) as Session;
+    await this.#set(session, "TOKEN_REFRESHED");
+    return ok(session);
   }
 
   signInWithPassword(credentials: Credentials): Promise<Result<Session>> {

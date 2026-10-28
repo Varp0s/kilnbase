@@ -57,20 +57,48 @@ class AuthClient:
         return self._obtain("/auth/v1/anonymous", {})
 
     def update_user(
-        self, password: str, *, current_password: str | None = None, email: str | None = None
+        self,
+        password: str | None = None,
+        *,
+        current_password: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
     ) -> None:
         """
-        Changes the password (send `current_password`, unless signed in through a password reset),
-        or turns an anonymous user into a permanent one when `email` is given. Other sessions are
-        signed out.
+        One change at a time; `current_password` is needed when the account has a password
+        (unless signed in through a password reset).
+
+        - `password`: changes it and signs out other sessions.
+        - `email` and `password` on an anonymous user: makes the account permanent.
+        - `email` or `phone`: sends a code to the new address or number; nothing changes until it
+          is passed to `confirm_email_change` / `confirm_phone_change`.
         """
-        body = {"password": password, "current_password": current_password, "email": email}
+        body = {
+            "password": password,
+            "current_password": current_password,
+            "email": email,
+            "phone": phone,
+        }
         res = self._authed(
             "PUT", "/auth/v1/user", json={k: v for k, v in body.items() if v is not None}
         )
         # An upgrade returns a fresh session (the anonymous flag is gone from the token).
         if res.status_code == 200:
             self.session = res.json()
+
+    def confirm_email_change(self, token: str) -> dict[str, Any]:
+        """Applies a pending email change with the code sent to the new address."""
+        self.session = self._authed(
+            "POST", "/auth/v1/user/email/verify", json={"token": token}
+        ).json()
+        return self.session
+
+    def confirm_phone_change(self, token: str) -> dict[str, Any]:
+        """Applies a pending phone change with the texted code."""
+        self.session = self._authed(
+            "POST", "/auth/v1/user/phone/verify", json={"token": token}
+        ).json()
+        return self.session
 
     def sign_in_with_otp(
         self,
