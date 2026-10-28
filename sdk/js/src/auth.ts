@@ -4,6 +4,8 @@ export interface User {
   id: string;
   /** null for anonymous users until they add one. */
   email: string | null;
+  /** E.164, set once the user signed in with a code texted to it. */
+  phone: string | null;
   is_anonymous: boolean;
   email_confirmed_at: string | null;
   created_at: string;
@@ -116,29 +118,37 @@ export class AuthClient {
   }
 
   /**
-   * Emails a 6-digit code, plus a magic link to `redirectTo` when given. The response is identical
-   * whether or not the address has an account.
+   * Emails a 6-digit code, plus a magic link to `redirectTo` when given, or texts a code to `phone`
+   * (E.164, e.g. "+15551234567"). The response is identical whether or not an account exists.
    */
-  async signInWithOtp({
-    email,
-    redirectTo,
-    createUser = true,
-  }: {
-    email: string;
-    redirectTo?: string;
-    createUser?: boolean;
-  }): Promise<Result<null>> {
+  async signInWithOtp(
+    params:
+      | { email: string; redirectTo?: string; createUser?: boolean }
+      | { phone: string; createUser?: boolean },
+  ): Promise<Result<null>> {
+    const { createUser = true } = params;
+    const target = "phone" in params
+      ? { phone: params.phone }
+      : { email: params.email, redirect_to: params.redirectTo };
     const res = await request(`${this.url}/auth/v1/otp`, {
       method: "POST",
       headers: { apikey: this.apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ email, redirect_to: redirectTo, create_user: createUser }),
+      body: JSON.stringify({ ...target, create_user: createUser }),
     });
     if (isError(res)) return { data: null, error: res };
     return res.ok ? ok(null) : toError(res);
   }
 
-  /** `type: "email"` with the emailed code, or `type: "magiclink"` with the `token` from the link. */
-  verifyOtp(params: { type: "email"; email: string; token: string } | { type: "magiclink"; token: string }) {
+  /**
+   * `type: "email"` with the emailed code, `type: "sms"` with the texted one, or `type: "magiclink"`
+   * with the `token` from the link.
+   */
+  verifyOtp(
+    params:
+      | { type: "email"; email: string; token: string }
+      | { type: "sms"; phone: string; token: string }
+      | { type: "magiclink"; token: string },
+  ) {
     return this.#obtain("/auth/v1/verify", params, "SIGNED_IN");
   }
 

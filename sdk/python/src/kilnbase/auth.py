@@ -73,13 +73,24 @@ class AuthClient:
             self.session = res.json()
 
     def sign_in_with_otp(
-        self, email: str, *, redirect_to: str | None = None, create_user: bool = True
+        self,
+        email: str | None = None,
+        *,
+        phone: str | None = None,
+        redirect_to: str | None = None,
+        create_user: bool = True,
     ) -> None:
         """
-        Emails a 6-digit code, plus a magic link to `redirect_to` when given. The response is
-        identical whether or not the address has an account.
+        Emails a 6-digit code, plus a magic link to `redirect_to` when given, or texts a code to
+        `phone` (E.164, e.g. "+15551234567"). The response is identical whether or not an account
+        exists.
         """
-        body = {"email": email, "redirect_to": redirect_to, "create_user": create_user}
+        body = {
+            "email": email,
+            "phone": phone,
+            "redirect_to": redirect_to,
+            "create_user": create_user,
+        }
         send(
             self._http,
             "POST",
@@ -88,9 +99,14 @@ class AuthClient:
             json={k: v for k, v in body.items() if v is not None},
         )
 
-    def verify_otp(self, type: str, token: str, *, email: str | None = None) -> dict[str, Any]:
-        """`type="email"` with the emailed code and `email`, or `"magiclink"` with its token."""
-        body = {"type": type, "email": email, "token": token}
+    def verify_otp(
+        self, type: str, token: str, *, email: str | None = None, phone: str | None = None
+    ) -> dict[str, Any]:
+        """
+        `type="email"` with the emailed code and `email`, `"sms"` with the texted code and
+        `phone`, or `"magiclink"` with its token.
+        """
+        body = {"type": type, "email": email, "phone": phone, "token": token}
         return self._obtain("/auth/v1/verify", {k: v for k, v in body.items() if v is not None})
 
     def sign_in_with_oauth(self, provider: str, *, redirect_to: str) -> str:

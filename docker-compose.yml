@@ -34,6 +34,10 @@ services:
       # Passwordless sign-in mail; without it codes are printed to the auth log (development only).
       KILNBASE_SMTP_URL: ${KILNBASE_SMTP_URL:-}
       KILNBASE_SMTP_FROM: ${KILNBASE_SMTP_FROM:-}
+      # Phone sign-in: a hook of yours that sends {"to", "body"} through your SMS provider, signed
+      # with the secret (32+ characters). Without it codes are printed to the auth log (development only).
+      KILNBASE_SMS_URL: ${KILNBASE_SMS_URL:-}
+      KILNBASE_SMS_SECRET: ${KILNBASE_SMS_SECRET:-}
       # Emails (codes, links, confirmations) one client IP may trigger per hour.
       KILNBASE_AUTH_MAILS_PER_IP_HOUR: ${KILNBASE_AUTH_MAILS_PER_IP_HOUR:-30}
       # Allow POST /auth/v1/anonymous (guest users that can later add an email and password).

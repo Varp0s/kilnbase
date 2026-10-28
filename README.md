@@ -295,6 +295,16 @@ AuthnRequests and single logout.
 exists. Set `KILNBASE_SMTP_URL` (`smtps://user:pass@host` or `smtp://` with STARTTLS); without it, mail is printed
 to the auth log for local development. JS: `kb.auth.signInWithOtp({ email })`, `kb.auth.verifyOtp(...)`.
 
+**Phone sign-in.** `POST /auth/v1/otp {"phone": "+15551234567"}` texts a 6-digit code; `POST /auth/v1/verify`
+with `{"type":"sms","phone","token"}` returns a session, creating the user unless `"create_user": false` was sent.
+Same rules as email codes, with at most 5 texts per number and hour. The number is stored only once a code sent
+to it was entered, and access tokens carry it as `phone`. Kilnbase does not talk to an SMS provider itself: set
+`KILNBASE_SMS_URL` to a hook of yours (https, or http to an internal host name) and `KILNBASE_SMS_SECRET`
+(32+ characters). It receives `POST {"to", "body"}` signed like webhooks (`X-Kilnbase-Signature`:
+`v1=` + HMAC-SHA256 of `"<X-Kilnbase-Timestamp>.<body>"`), and must answer 2xx once the text is sent. Without a
+hook, texts are printed to the auth log for local development. JS: `kb.auth.signInWithOtp({ phone })`,
+`kb.auth.verifyOtp({ type: "sms", phone, token })`; Python: `sign_in_with_otp(phone=...)`.
+
 **Email confirmation and password reset.** With SMTP configured, password sign-ups get a confirmation mail
 (`POST /auth/v1/verify {"type":"signup", ...}`); access tokens carry `email_verified`, so a policy can require it:
 `using ((auth.jwt() ->> 'email_verified')::boolean and owner = auth.uid())`. `POST /auth/v1/recover {"email"}`

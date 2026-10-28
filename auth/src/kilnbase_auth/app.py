@@ -38,6 +38,7 @@ from .oauth import (
 )
 from .ratelimit import FailureLimiter
 from .saml import MAX_RESPONSE_BYTES, SamlError, authn_redirect, new_request_id, verify_response
+from .sms import SmsSender, normalize_phone
 from .tokens import (
     ACCESS_TOKEN_LIFETIME,
     REFRESH_TOKEN_LIFETIME,
@@ -82,14 +83,17 @@ class CodeExchange(BaseModel):
 
 
 class OtpRequest(BaseModel):
-    email: str = Field(max_length=254)
+    # Exactly one of the two.
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
     create_user: bool = True
     redirect_to: str | None = Field(default=None, max_length=2048)
 
 
 class VerifyRequest(BaseModel):
-    type: Literal["email", "magiclink", "signup", "recovery"]
+    type: Literal["email", "magiclink", "signup", "recovery", "sms"]
     email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
     token: str = Field(max_length=256)
 
 
@@ -117,6 +121,7 @@ VERIFY_PURPOSE = {
     "magiclink": "signin",
     "signup": "confirm",
     "recovery": "recovery",
+    "sms": "sms",
 }
 
 
@@ -143,6 +148,7 @@ def user_json(row) -> dict:
     return {
         "id": str(row["id"]),
         "email": row["email"],
+        "phone": row.get("phone"),
         "is_anonymous": row.get("is_anonymous", False),
         "email_confirmed_at": confirmed and confirmed.isoformat(),
         "created_at": row["created_at"].isoformat(),
@@ -173,6 +179,9 @@ def create_app(config: Config) -> FastAPI:
     otp_email_limiter = FailureLimiter(limit=5, window=3600)
     otp_ip_limiter = FailureLimiter(limit=config.mails_per_ip_hour, window=3600)
     mailer = Mailer(config.smtp_url, config.smtp_from)
+    sms = SmsSender(config.sms_url, config.sms_secret)
+    # Every text costs the operator money: 5 per number and hour, and the per-IP mail budget.
+    otp_phone_limiter = FailureLimiter(limit=5, window=3600)
     anonymous_ip_limiter = FailureLimiter(limit=30, window=3600)
 
     @asynccontextmanager
@@ -208,7 +217,8 @@ def create_app(config: Config) -> FastAPI:
         )
         user = await conn.fetchrow(
             "update auth.users set last_sign_in_at = now() where id = $1"
-            " returning id, email, created_at, last_sign_in_at, email_confirmed_at, is_anonymous",
+            " returning id, email, phone, created_at, last_sign_in_at, email_confirmed_at,"
+            " is_anonymous",
             user_id,
         )
         aal, recovery = await conn.fetchrow(
@@ -231,6 +241,7 @@ def create_app(config: Config) -> FastAPI:
             email_verified=user["email_confirmed_at"] is not None,
             recovery=recovery,
             is_anonymous=user["is_anonymous"],
+            phone=user["phone"],
         )
         return {
             "access_token": access_token,
@@ -616,13 +627,57 @@ def create_app(config: Config) -> FastAPI:
             return error(503, "mail_unavailable", "could not send the email, try again later")
         return None
 
+    async def send_sms_code(phone: str, create_user: bool, ip: str) -> JSONResponse | None:
+        """Stores a fresh code for the number and texts it; None on success."""
+        for limiter, key in [(otp_phone_limiter, phone), (otp_ip_limiter, ip)]:
+            if wait := limiter.retry_after(key):
+                return error(
+                    429,
+                    "too_many_requests",
+                    "too many codes requested",
+                    headers={"Retry-After": str(wait)},
+                )
+            limiter.fail(key)
+        code = f"{secrets.randbelow(10**6):06d}"
+        await app.state.pool.execute(
+            "insert into auth.phone_codes (phone, code_hash, create_user) values ($1, $2, $3)"
+            " on conflict (phone) do update set code_hash = excluded.code_hash,"
+            " create_user = excluded.create_user, attempts = 0, created_at = now()",
+            phone,
+            digest(f"{phone}:sms:{code}"),
+            create_user,
+        )
+        text = f"Your sign-in code is {code}. It expires in {OTP_LIFETIME // 60} minutes."
+        try:
+            await sms.send(app.state.http, phone, text)
+        except httpx.HTTPError as e:
+            # The type only: the hook URL may carry a secret.
+            log.error("sending SMS failed: %s", type(e).__name__)
+            await app.state.pool.execute("delete from auth.phone_codes where phone = $1", phone)
+            return error(503, "sms_unavailable", "could not send the text message, try again later")
+        return None
+
     @app.post("/otp")
     async def request_otp(body: OtpRequest, request: Request):
-        """Emails a 6-digit code (and a magic link when redirect_to is given).
+        """Emails a 6-digit code (and a magic link when redirect_to is given), or texts one.
 
-        The answer is the same whether or not an account exists, so it cannot probe for emails.
+        The answer is the same whether or not an account exists, so it cannot probe for accounts.
         """
-        email = normalize_email(body.email)
+        if (body.email is None) == (body.phone is None):
+            return error(422, "invalid_request", "give either email or phone")
+        if body.phone is not None:
+            phone = normalize_phone(body.phone)
+            if phone is None:
+                return error(422, "invalid_phone", "phone number must be in E.164 form")
+            if not body.create_user:
+                exists = await app.state.pool.fetchval(
+                    "select exists (select 1 from auth.users where phone = $1)", phone
+                )
+                if not exists:
+                    return {"sent": True}
+            failed = await send_sms_code(phone, body.create_user, client_ip(request))
+            return failed or {"sent": True}
+        email = normalize_email(body.email or "")
         if email is None:
             return error(422, "invalid_email", "email address is not valid")
         if body.redirect_to and not redirect_ok(body.redirect_to):
@@ -660,6 +715,8 @@ def create_app(config: Config) -> FastAPI:
         purpose = VERIFY_PURPOSE[body.type]
         # "email" is always a code; "magiclink" always a link; the others accept either.
         use_code = body.type == "email" or (body.type != "magiclink" and body.email is not None)
+        if body.type == "sms":
+            return await verify_sms(body)
         async with app.state.pool.acquire() as conn, conn.transaction():
             if use_code:
                 email = normalize_email(body.email or "")
@@ -730,6 +787,41 @@ def create_app(config: Config) -> FastAPI:
             )
             return await issue_session(conn, user_id, email, session_id)
 
+    async def verify_sms(body: VerifyRequest):
+        invalid = error(400, "invalid_otp", "code is wrong, expired or already used")
+        phone = normalize_phone(body.phone or "")
+        if phone is None:
+            return invalid
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "select code_hash, create_user, attempts,"
+                " created_at > now() - make_interval(secs => $2) as fresh"
+                " from auth.phone_codes where phone = $1 for update",
+                phone,
+                OTP_LIFETIME,
+            )
+            if row is None:
+                return invalid
+            if not (
+                row["fresh"]
+                and row["attempts"] < OTP_MAX_ATTEMPTS
+                and hmac.compare_digest(digest(f"{phone}:sms:{body.token}"), row["code_hash"])
+            ):
+                # Too many wrong tries kills the code, so 6 digits cannot be brute forced.
+                await conn.execute(
+                    "update auth.phone_codes set attempts = attempts + 1 where phone = $1", phone
+                )
+                return invalid
+            await conn.execute("delete from auth.phone_codes where phone = $1", phone)
+            user = await conn.fetchrow("select id, email from auth.users where phone = $1", phone)
+            if user is None:
+                if not row["create_user"]:
+                    return invalid
+                user = await conn.fetchrow(
+                    "insert into auth.users (phone) values ($1) returning id, email", phone
+                )
+            return await issue_session(conn, user["id"], user["email"])
+
     async def current_session(request: Request) -> dict | None:
         token = bearer(request)
         if token is None:
@@ -761,7 +853,7 @@ def create_app(config: Config) -> FastAPI:
         if claims is None:
             return error(401, "unauthorized", "a valid access token is required")
         row = await app.state.pool.fetchrow(
-            "select id, email, created_at, last_sign_in_at, email_confirmed_at"
+            "select id, email, phone, is_anonymous, created_at, last_sign_in_at, email_confirmed_at"
             " from auth.users where id = $1::uuid",
             claims["sub"],
         )

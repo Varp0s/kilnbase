@@ -30,6 +30,9 @@ services:
   auth:
     environment:
       KILNBASE_SMTP_URL: smtp://mailpit:1025
+      # The mock records texts at /hooks/sms; the secret is test-only.
+      KILNBASE_SMS_URL: http://oauth-mock:9100/hooks/sms
+      KILNBASE_SMS_SECRET: e2e-sms-secret-0123456789abcdef0123
       # Every e2e sign-up sends mail from one IP; the per-address limits are still exercised.
       KILNBASE_AUTH_MAILS_PER_IP_HOUR: "10000"
       KILNBASE_AUTH_ANONYMOUS: "true"

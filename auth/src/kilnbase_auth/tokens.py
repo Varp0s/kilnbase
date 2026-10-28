@@ -19,6 +19,7 @@ def user_claims(
     email_verified: bool = False,
     recovery: bool = False,
     is_anonymous: bool = False,
+    phone: str | None = None,
 ) -> dict:
     """A user's access-token claims minus iat/exp; Studio's "view as user" uses them too."""
     return {
@@ -32,6 +33,8 @@ def user_claims(
         "email_verified": email_verified,
         "amr": ["recovery"] if recovery else [],
         "is_anonymous": is_anonymous,
+        # Only ever a number the user proved they receive codes at.
+        "phone": phone,
     }
 
 

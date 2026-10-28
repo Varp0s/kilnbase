@@ -14,6 +14,7 @@ import pytest
 from conftest import BASE_URL, psql, wait_for_schema
 from kilnbase import KilnbaseError, create_client
 from test_otp import APP, MAILPIT, code_in, latest_mail
+from test_phone import latest_code, number
 from test_storage_images import png, png_size
 
 PASSWORD = "correct horse battery staple"
@@ -308,3 +309,12 @@ def test_realtime_follows_rls_and_the_session(client, keys, kb):
     assert r.status_code == 201, r.text
     assert wait_for(kb, row_id, 1.5) is None
     other.close()
+
+
+def test_phone_sign_in(keys):
+    kb = create_client(BASE_URL, keys.anon)
+    phone = number()
+    kb.auth.sign_in_with_otp(phone=phone)
+    session = kb.auth.verify_otp("sms", latest_code(phone), phone=phone)
+    assert session["user"]["phone"] == phone
+    assert kb.auth.get_user()["phone"] == phone

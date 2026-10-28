@@ -47,11 +47,11 @@ select c.relname as name, c.relrowsecurity as rls,
 """
 # Explicit columns only: auth tables also hold password hashes, MFA secrets and token hashes.
 USERS_SQL = """
-select id, email, created_at, is_anonymous, email_confirmed_at, last_sign_in_at,
+select id, email, phone, created_at, is_anonymous, email_confirmed_at, last_sign_in_at,
        (select count(*) from auth.sessions s
          where s.user_id = u.id and s.revoked_at is null) as active_sessions
   from auth.users u
- where $1 = '' or strpos(lower(email), lower($1)) > 0
+ where $1 = '' or strpos(lower(email), lower($1)) > 0 or strpos(phone, $1) > 0
  order by created_at desc limit 50
 """
 # Neither the URL (chat webhooks carry their secret in it) nor the signing secret.
@@ -66,7 +66,8 @@ select quote_ident(c.relname) from pg_class c join pg_namespace n on n.oid = c.r
  where n.nspname = 'public' and c.relname = $1 and c.relkind in ('r', 'p', 'v')
 """
 USER_SQL = """
-select u.id, u.email, u.email_confirmed_at is not null as email_verified, u.is_anonymous,
+select u.id, u.email, u.phone, u.email_confirmed_at is not null as email_verified,
+       u.is_anonymous,
        s.id as session_id, s.aal, s.recovery
   from auth.users u
   left join lateral (select id, aal, recovery from auth.sessions
@@ -674,6 +675,7 @@ def create_app(config: Config) -> FastAPI:
                     email_verified=user["email_verified"],
                     recovery=bool(user["recovery"]),
                     is_anonymous=user["is_anonymous"],
+                    phone=user["phone"],
                 ) | {"iat": now, "exp": now + ACCESS_TOKEN_LIFETIME}
             tx = conn.transaction()
             await tx.start()

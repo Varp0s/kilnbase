@@ -105,7 +105,7 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
 interface Policy { name: string; command: string; roles: string[]; using: string | null; check: string | null }
 interface TableInfo { name: string; rls: boolean; policies: Policy[] }
 interface User {
-  id: string; email: string | null; created_at: string; is_anonymous: boolean;
+  id: string; email: string | null; phone: string | null; created_at: string; is_anonymous: boolean;
   email_confirmed_at: string | null; last_sign_in_at: string | null; active_sessions: number;
 }
 interface ViewAsResult { role: string; claims: Row; denied: boolean; rows: Row[] }
@@ -570,7 +570,7 @@ const views: Record<string, () => Promise<Node[]>> = {
     const tableSelect = el("select", { id: "va-table", required: true },
       ...tables.map((t) => el("option", { value: t.name }, t.name)));
     const userSelect = el("select", { id: "va-user" }, el("option", { value: "" }, "anon (no user)"),
-      ...users.map((u) => el("option", { value: u.id }, u.email ?? `${u.id} (anonymous)`)));
+      ...users.map((u) => el("option", { value: u.id }, u.email ?? u.phone ?? `${u.id} (anonymous)`)));
     const result = el("div");
     const form = el("form", {},
       el("label", { htmlFor: "va-table" }, "Table"), tableSelect,
@@ -596,7 +596,7 @@ const views: Record<string, () => Promise<Node[]>> = {
     const search = el("input", { type: "search", placeholder: "email contains…", id: "user-search" });
     const act = async (u: User, action: string, question: string) => {
       const danger = action !== "confirm-email";
-      if (!(await confirmDialog(u.email ?? "Anonymous user", question, { confirmLabel: action === "delete" ? "Delete user" : action === "sign-out" ? "Sign out everywhere" : "Confirm email", danger }))) return;
+      if (!(await confirmDialog(u.email ?? u.phone ?? "Anonymous user", question, { confirmLabel: action === "delete" ? "Delete user" : action === "sign-out" ? "Sign out everywhere" : "Confirm email", danger }))) return;
       api(`/api/users/${u.id}/${action}`, {}).then(() => { toast("Done"); void load(); }).catch((err: unknown) => fail(err, result));
     };
     const row = (u: User) => {
@@ -610,9 +610,9 @@ const views: Record<string, () => Promise<Node[]>> = {
       if (u.active_sessions > 0) {
         button("Sign out", "sign-out", "End all sessions? Refresh tokens stop working now; access tokens already issued stay valid for up to an hour.");
       }
-      button("Delete", "delete", `Delete ${u.email ?? u.id} and everything linked to the account? This cannot be undone.`, true);
+      button("Delete", "delete", `Delete ${u.email ?? u.phone ?? u.id} and everything linked to the account? This cannot be undone.`, true);
       return el("tr", {},
-        el("td", {}, u.email ?? el("span", { className: "hint" }, "anonymous")),
+        el("td", {}, u.email ?? u.phone ?? el("span", { className: "hint" }, u.is_anonymous ? "anonymous" : "")),
         el("td", {}, u.email_confirmed_at ? el("span", { className: "ok" }, "confirmed") : el("span", { className: "hint" }, "unconfirmed")),
         el("td", { title: u.last_sign_in_at ?? "" }, u.last_sign_in_at ? new Date(u.last_sign_in_at).toLocaleString() : "never"),
         el("td", {}, String(u.active_sessions)),

@@ -6,6 +6,10 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 ## [Unreleased]
 
 ### Added
+- **Auth**: phone sign-in with texted 6-digit codes, sent through a signed HTTP hook of your own
+  (`KILNBASE_SMS_URL`, `KILNBASE_SMS_SECRET`), so any SMS provider works. Access tokens and the user carry the
+  verified `phone`; Studio shows it and finds users by it. The JS and Python clients accept `phone` in
+  `signInWithOtp` / `verifyOtp`.
 - **Studio**: table editor (browse rows a page at a time; insert, edit and delete rows of tables with a primary
   key, as service_role).
 - **Studio**: SQL editor (runs as the database superuser in one transaction, optionally rolled back; first

@@ -8,6 +8,7 @@ import jwt
 
 from .oauth import Provider, load_providers
 from .saml import IdentityProvider, load_identity_providers
+from .sms import http_allowed
 
 # Value shipped in .env.example; refusing it stops people from running with published secrets.
 PLACEHOLDER = "change-me"
@@ -33,6 +34,8 @@ class Config:
     mails_per_ip_hour: int = 30
     anonymous_sign_in: bool = False
     mfa_required: bool = False
+    sms_url: str | None = None
+    sms_secret: str | None = None
 
 
 def load(env: Mapping[str, str]) -> Config:
@@ -87,7 +90,19 @@ def load(env: Mapping[str, str]) -> Config:
     if not per_ip.isdigit() or int(per_ip) < 1:
         raise ConfigError("KILNBASE_AUTH_MAILS_PER_IP_HOUR must be a positive number")
 
+    sms_url = env.get("KILNBASE_SMS_URL", "").strip() or None
+    sms_secret = env.get("KILNBASE_SMS_SECRET", "").strip() or None
+    if sms_url:
+        if not http_allowed(sms_url):
+            raise ConfigError(
+                "KILNBASE_SMS_URL must be https:// (http:// only for an internal host name)"
+            )
+        if not sms_secret or sms_secret == PLACEHOLDER or len(sms_secret) < 32:
+            raise ConfigError("KILNBASE_SMS_SECRET must be set, at least 32 characters")
+
     return Config(
+        sms_url=sms_url,
+        sms_secret=sms_secret,
         anonymous_sign_in=env.get("KILNBASE_AUTH_ANONYMOUS", "").strip().lower() == "true",
         mfa_required=env.get("KILNBASE_AUTH_MFA_REQUIRED", "").strip().lower() == "true",
         mails_per_ip_hour=int(per_ip),
