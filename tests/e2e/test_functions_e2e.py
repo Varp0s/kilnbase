@@ -106,10 +106,12 @@ def test_typescript_functions(client, keys):
     assert files == {"root_writable": False, "functions": [], "cwd": ["main.ts"]}
 
 
-# Node takes seconds to exit once its heap is full, so the time limit is what ends that call.
-@pytest.mark.parametrize(("what", "status"), [("loop", 504), ("memory", 500), ("heap", 504)])
-def test_runaway_typescript_functions_are_contained(client, keys, what, status):
-    assert call(client, keys, "node", what=what).status_code == status
+# Once its heap is full Node may take seconds to exit, so the time limit can end that call first.
+@pytest.mark.parametrize(
+    ("what", "statuses"), [("loop", {504}), ("memory", {500}), ("heap", {500, 504})]
+)
+def test_runaway_typescript_functions_are_contained(client, keys, what, statuses):
+    assert call(client, keys, "node", what=what).status_code in statuses
     assert call(client, keys, "node").status_code == 201
 
 
