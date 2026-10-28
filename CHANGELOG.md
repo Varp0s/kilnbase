@@ -35,6 +35,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   one rotation); Studio reads them read-only. Postgres, PostgREST and imgproxy still log to stderr only.
 
 ### Changed
+- **Releases**: an `edge` image channel, built from `main` every night once CI has passed on that commit (also
+  tagged `edge-<commit>`).
 - **Studio**: new look: a sidebar with grouped sections, a sign-in card, light and dark themes that follow the
   system, consistent tables, badges and forms, and a layout that works on phones. The open page is kept in the
   URL. The UI is built with Vite (still no framework: about 11 KB gzipped); `npm run dev` in `studio/web` serves

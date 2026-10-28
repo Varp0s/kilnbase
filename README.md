@@ -187,6 +187,10 @@ the next successful `upgrade` removes it. The backup is always kept. Expect down
 and the start of the new version take. If `upgrade` itself is killed midway, `core` may stay stopped:
 run `docker compose up -d` (the backup it was writing is complete only if the file exists).
 
+Published images (`ghcr.io/varp0s/kilnbase-<core|auth|postgres|studio|functions|graphql>`) are tagged with each
+release (`0.8.0`, `0.8`) and with `edge`: `main`, rebuilt every night once CI has passed on it, also kept as
+`edge-<commit>`. Edge images are for trying what comes next, not for production.
+
 ### TypeScript types
 
 ```sh
