@@ -103,6 +103,33 @@ fn xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Undoes the escaping XML request bodies use for keys, including numeric references.
+fn xml_unescape(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let (entity, after) = rest[i + 1..].split_once(';')?;
+        out.push(match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => {
+                let n = match entity.strip_prefix("#x") {
+                    Some(h) => u32::from_str_radix(h, 16).ok()?,
+                    None => entity.strip_prefix('#')?.parse().ok()?,
+                };
+                char::from_u32(n)?
+            }
+        });
+        rest = after;
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 fn xml_response(body: String) -> Response {
     (
         [(header::CONTENT_TYPE, "application/xml")],
@@ -551,11 +578,17 @@ pub async fn handle(State(st): State<Arc<AppState>>, req: Request) -> Response {
         Method::PUT if has_key && multipart => {
             Some(upload_part(&st, &caller, &target, &parts.headers, body).await)
         }
+        Method::PUT if has_key && parts.headers.contains_key("x-amz-copy-source") => {
+            Some(copy_object(&st, &caller, &target, &parts.headers).await)
+        }
         Method::PUT if has_key => {
             Some(put_object(&st, &caller, &target, &parts.headers, body).await)
         }
         Method::POST if has_key && multipart => {
-            Some(complete_multipart(&st, &caller, &target, body).await)
+            Some(complete_multipart(&st, &caller, &target, &parts.headers, body).await)
+        }
+        Method::POST if has_bucket && !has_key && target.param("delete").is_some() => {
+            Some(delete_objects(&st, &caller, &target, &parts.headers, body).await)
         }
         _ => None,
     };
@@ -782,6 +815,14 @@ fn encode_key(key: &str, url_encoded: bool) -> String {
     }
 }
 
+fn no_such_key() -> S3Error {
+    err(
+        StatusCode::NOT_FOUND,
+        "NoSuchKey",
+        "the specified key does not exist",
+    )
+}
+
 /// `(start, len)` for a single `bytes=` range; `None` serves the whole object, as HTTP allows
 /// for ranges a server does not understand.
 fn parse_range(raw: &str, size: u64) -> Result<Option<(u64, u64)>, S3Error> {
@@ -823,13 +864,6 @@ async fn get_object(
     head: bool,
 ) -> Result<Response, S3Error> {
     t.only_params(&[])?;
-    let no_such_key = || {
-        err(
-            StatusCode::NOT_FOUND,
-            "NoSuchKey",
-            "the specified key does not exist",
-        )
-    };
     if !storage::valid_name(&t.key) {
         return Err(no_such_key());
     }
@@ -901,9 +935,6 @@ async fn put_object(
     let storage = &st.storage;
     let checked = async {
         t.only_params(&[])?;
-        if headers.contains_key("x-amz-copy-source") {
-            return Err(not_implemented());
-        }
         let mime = storage::mime_essence(headers.get(header::CONTENT_TYPE))
             .ok_or_else(|| bad_request("invalid content-type"))?;
         let object = NewObject {
@@ -941,6 +972,161 @@ async fn put_object(
         res.headers_mut().insert(header::ETAG, v);
     }
     Ok(res)
+}
+
+/// CopyObject. The source is read and the target written as the caller, so RLS decides both.
+async fn copy_object(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    headers: &HeaderMap,
+) -> Result<Response, S3Error> {
+    t.only_params(&[])?;
+    let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+    let source = header("x-amz-copy-source").unwrap_or("");
+    // A `?versionId=` or a conditional copy would need versions and preconditions we don't keep.
+    if source.contains('?')
+        || headers
+            .keys()
+            .any(|k| k.as_str().starts_with("x-amz-copy-source-if-"))
+    {
+        return Err(not_implemented());
+    }
+    let (src_bucket, src_key) = pct_decode(source.strip_prefix('/').unwrap_or(source))
+        .and_then(|s| s.split_once('/').map(|(b, k)| (b.to_owned(), k.to_owned())))
+        .filter(|(b, k)| !b.is_empty() && !k.is_empty())
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "x-amz-copy-source must be bucket/key",
+            )
+        })?;
+    let row = {
+        let mut client = db::client(&st.storage.pool).await?;
+        let tx = db::begin_as(&mut client, caller).await?;
+        tx.query_opt(
+            "select id::text, mime_type from storage.objects where bucket_id = $1 and name = $2",
+            &[&src_bucket, &src_key],
+        )
+        .await
+        .map_err(db::internal)?
+        .ok_or_else(no_such_key)?
+    };
+    let (src_id, mut mime): (String, String) = (row.get(0), row.get(1));
+    if header("x-amz-metadata-directive") == Some("REPLACE") {
+        mime = storage::mime_essence(headers.get(header::CONTENT_TYPE))
+            .ok_or_else(|| bad_request("invalid content-type"))?;
+    }
+    let object = NewObject {
+        bucket: &t.bucket,
+        name: &t.key,
+        mime: &mime,
+        upsert: true,
+    };
+    let limit = object.limit(&st.storage).await?;
+    // A source deleted meanwhile surfaces as `not_found`, i.e. NoSuchKey.
+    let copied = storage::assemble(&st.storage, &[st.storage.object_path(&src_id)], limit).await?;
+    let id = object
+        .store(&st.storage, caller, copied.size, &copied.path)
+        .await?;
+    copied.keep();
+    let modified: String = {
+        let mut client = db::client(&st.storage.pool).await?;
+        let tx = db::begin_as_service(&mut client).await?;
+        let sql = format!("select {ISO_DATE} from storage.objects where id = $1::text::uuid");
+        tx.query_one(&sql, &[&id])
+            .await
+            .map_err(db::internal)?
+            .get(0)
+    };
+    Ok(xml_response(format!(
+        r#"<CopyObjectResult xmlns="{XMLNS}"><LastModified>{modified}</LastModified><ETag>&quot;{id}&quot;</ETag></CopyObjectResult>"#
+    )))
+}
+
+/// Reads a small XML request body, holding it to a declared x-amz-content-sha256.
+async fn read_xml(headers: &HeaderMap, body: Body) -> Result<String, S3Error> {
+    let malformed = || {
+        err(
+            StatusCode::BAD_REQUEST,
+            "MalformedXML",
+            "the request body is not valid",
+        )
+    };
+    let raw = http_body_util::Limited::new(body, 2 * 1024 * 1024)
+        .collect()
+        .await
+        .map_err(|_| malformed())?
+        .to_bytes();
+    let (payload, _) = payload_mode(headers);
+    let expected = (payload.len() == 64).then(|| unhex(payload)).flatten();
+    if expected.is_some_and(|e| digest::digest(&digest::SHA256, &raw).as_ref() != e.as_slice()) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "XAmzContentSHA256Mismatch",
+            "the payload does not match x-amz-content-sha256",
+        ));
+    }
+    String::from_utf8(raw.to_vec()).map_err(|_| malformed())
+}
+
+/// `(keys, quiet)` from a DeleteObjects body.
+fn delete_request(body: &str) -> Option<(Vec<String>, bool)> {
+    let keys = body
+        .split("<Key>")
+        .skip(1)
+        .map(|s| xml_unescape(s.split_once("</Key>")?.0))
+        .collect::<Option<Vec<_>>>()?;
+    let quiet = body
+        .split_once("<Quiet>")
+        .and_then(|(_, s)| s.split_once("</Quiet>"))
+        .is_some_and(|(q, _)| q.trim() == "true");
+    Some((keys, quiet))
+}
+
+/// DeleteObjects: up to 1000 keys, each removed as the caller; as with DeleteObject, a missing
+/// key counts as deleted.
+async fn delete_objects(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    if let Err(e) = t.only_params(&["delete"]) {
+        return Err(storage::drain(body, e).await);
+    }
+    let raw = read_xml(headers, body).await?;
+    let (keys, quiet) = delete_request(&raw)
+        .filter(|(k, _)| (1..=1000).contains(&k.len()))
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "list between 1 and 1000 keys to delete",
+            )
+        })?;
+    bucket_exists(st, &t.bucket).await?;
+    let mut out = format!(r#"<DeleteResult xmlns="{XMLNS}">"#);
+    // shortcut: one transaction per key; batch them if large deletes get slow.
+    for key in keys {
+        match storage::remove(&st.storage, caller, &t.bucket, &key).await {
+            Err(e) if e.code() != "not_found" => {
+                let e = S3Error::from(e);
+                out.push_str(&format!(
+                    "<Error><Key>{}</Key><Code>{}</Code><Message>{}</Message></Error>",
+                    xml(&key),
+                    e.code,
+                    xml(e.message)
+                ));
+            }
+            _ if quiet => {}
+            _ => out.push_str(&format!("<Deleted><Key>{}</Key></Deleted>", xml(&key))),
+        }
+    }
+    out.push_str("</DeleteResult>");
+    Ok(xml_response(out))
 }
 
 /// `(payload hash, aws-chunked)`; presigned uploads carry no hash header and are unsigned.
@@ -1114,6 +1300,10 @@ async fn upload_part(
 ) -> Result<Response, S3Error> {
     let checked = async {
         t.only_params(&["partNumber", "uploadId"])?;
+        // UploadPartCopy is not implemented; without this the empty body would become the part.
+        if headers.contains_key("x-amz-copy-source") {
+            return Err(not_implemented());
+        }
         let part = t
             .param("partNumber")
             .and_then(|v| v.parse::<u32>().ok())
@@ -1162,6 +1352,7 @@ async fn complete_multipart(
     st: &AppState,
     caller: &Caller,
     t: &Target,
+    headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
     let opened = async {
@@ -1173,23 +1364,15 @@ async fn complete_multipart(
         Ok(v) => v,
         Err(e) => return Err(storage::drain(body, e).await),
     };
-    let malformed = || {
-        err(
-            StatusCode::BAD_REQUEST,
-            "MalformedXML",
-            "the part list is not valid",
-        )
-    };
-    let raw = http_body_util::Limited::new(body, 1024 * 1024)
-        .collect()
-        .await
-        .map_err(|_| malformed())?
-        .to_bytes();
-    let parts = std::str::from_utf8(&raw)
-        .ok()
-        .and_then(completed_parts)
+    let parts = completed_parts(&read_xml(headers, body).await?)
         .filter(|p| !p.is_empty())
-        .ok_or_else(malformed)?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "the part list is not valid",
+            )
+        })?;
     if !parts.windows(2).all(|w| w[0] < w[1]) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -1380,6 +1563,23 @@ mod tests {
     }
 
     #[test]
+    fn delete_requests_and_xml_entities() {
+        let body = "<Delete><Quiet>true</Quiet><Object><Key>a&amp;b&#xD;&#38;.txt</Key></Object><Object><Key>c</Key><VersionId>x</VersionId></Object></Delete>";
+        assert_eq!(
+            delete_request(body),
+            Some((vec!["a&b\r&.txt".to_owned(), "c".to_owned()], true))
+        );
+        assert_eq!(
+            delete_request("<Delete><Object><Key>x</Key></Object></Delete>"),
+            Some((vec!["x".to_owned()], false))
+        );
+        assert_eq!(delete_request("<Key>unclosed"), None);
+        for bad in ["&bogus;", "&#xZZ;", "&#1114112;", "a & b"] {
+            assert_eq!(xml_unescape(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn ranges() {
         assert_eq!(parse_range("bytes=0-9", 100).ok().flatten(), Some((0, 10)));
         assert_eq!(parse_range("bytes=90-", 100).ok().flatten(), Some((90, 10)));
@@ -1423,6 +1623,7 @@ mod tests {
             let _ = pct_decode(&s);
             let _ = parse_amz_date(&s);
             let _ = parse_authorization(&s);
+            let _ = delete_request(&s);
         }
     }
 }

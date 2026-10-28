@@ -398,8 +398,9 @@ s3 = boto3.client(
 )
 ```
 
-Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/DeleteObject, multipart uploads and SigV4
-presigned URLs. Copies, batch deletes, ACLs and tagging answer `NotImplemented`. A TLS proxy in front must
+Supported: ListBuckets, ListObjectsV2, Head/Get (with ranges)/Put/Copy/DeleteObject, DeleteObjects, multipart
+uploads and SigV4 presigned URLs. UploadPartCopy (which boto3's managed `copy()` uses above 8 MB; call
+`copy_object` instead), versioned or conditional copies, ACLs and tagging answer `NotImplemented`. A TLS proxy in front must
 keep the `Host` header, which is part of the signature.
 
 Access to a file is access to its row in `storage.objects`, so sharing rules are ordinary RLS policies:

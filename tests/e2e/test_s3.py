@@ -168,12 +168,79 @@ def test_limits_and_unsupported_operations(service):
         service.put_object(Bucket="e2e-s3-small", Key="big.bin", Body=b"x" * 64)
     assert code(e) == "EntityTooLarge"
     with pytest.raises(ClientError) as e:
-        service.copy_object(Bucket="e2e-s3", Key="copy.bin", CopySource="e2e-s3/anything")
-    assert code(e) == "NotImplemented"
-    with pytest.raises(ClientError) as e:
         service.get_object_acl(Bucket="e2e-s3", Key="anything")
     assert code(e) == "NotImplemented"
     assert "e2e-s3" in [b["Name"] for b in service.list_buckets()["Buckets"]]
+
+
+def test_copy_object(service, keys):
+    src = f"{uuid.uuid4().hex}/source file.txt"
+    service.put_object(Bucket="e2e-s3", Key=src, Body=b"copy me", ContentType="text/plain")
+
+    dst = f"{uuid.uuid4().hex}/ğ copy.txt"
+    r = service.copy_object(Bucket="e2e-s3", Key=dst, CopySource={"Bucket": "e2e-s3", "Key": src})
+    assert r["CopyObjectResult"]["ETag"]
+    got = service.get_object(Bucket="e2e-s3", Key=dst)
+    assert got["Body"].read() == b"copy me"
+    assert got["ContentType"] == "text/plain"
+
+    service.copy_object(
+        Bucket="e2e-s3",
+        Key=dst,
+        CopySource={"Bucket": "e2e-s3", "Key": src},
+        MetadataDirective="REPLACE",
+        ContentType="application/octet-stream",
+    )
+    head = service.head_object(Bucket="e2e-s3", Key=dst)
+    assert head["ContentType"] == "application/octet-stream"
+
+    service.put_object(Bucket="e2e-s3", Key=src, Body=b"x" * 64)
+    with pytest.raises(ClientError) as e:
+        service.copy_object(Bucket="e2e-s3-small", Key=dst, CopySource=f"e2e-s3/{src}")
+    assert code(e) == "EntityTooLarge"
+    with pytest.raises(ClientError) as e:
+        service.copy_object(Bucket="e2e-s3", Key=dst, CopySource="e2e-s3/missing.txt")
+    assert code(e) == "NoSuchKey"
+    with pytest.raises(ClientError) as e:
+        service.copy_object(
+            Bucket="e2e-s3", Key=dst, CopySource={"Bucket": "e2e-s3", "Key": src, "VersionId": "1"}
+        )
+    assert code(e) == "NotImplemented"
+
+    # RLS reads the source as the caller: another user's object cannot be copied.
+    a, b = user_client(keys), user_client(keys)
+    mine = f"{uuid.uuid4().hex}.txt"
+    a.put_object(Bucket="e2e-s3", Key=mine, Body=b"private")
+    with pytest.raises(ClientError) as e:
+        b.copy_object(Bucket="e2e-s3", Key=f"{uuid.uuid4().hex}.txt", CopySource=f"e2e-s3/{mine}")
+    assert code(e) == "NoSuchKey"
+
+
+def test_delete_objects(service, keys):
+    root = uuid.uuid4().hex
+    names = [f"{root}/a.txt", f"{root}/b & <c>.txt", f'{root}/it\'s "quoted".txt']
+    for n in names:
+        service.put_object(Bucket="e2e-s3", Key=n, Body=b"x")
+
+    r = service.delete_objects(
+        Bucket="e2e-s3",
+        Delete={"Objects": [{"Key": n} for n in names + [f"{root}/missing.txt"]]},
+    )
+    assert sorted(d["Key"] for d in r["Deleted"]) == sorted(names + [f"{root}/missing.txt"])
+    assert "Errors" not in r
+    assert "Contents" not in service.list_objects_v2(Bucket="e2e-s3", Prefix=f"{root}/")
+
+    # Another user's object stays: RLS hides it, so it reads as already gone.
+    a, b = user_client(keys), user_client(keys)
+    mine = f"{uuid.uuid4().hex}.txt"
+    a.put_object(Bucket="e2e-s3", Key=mine, Body=b"mine")
+    r = b.delete_objects(Bucket="e2e-s3", Delete={"Objects": [{"Key": mine}], "Quiet": True})
+    assert "Deleted" not in r and "Errors" not in r
+    assert a.get_object(Bucket="e2e-s3", Key=mine)["Body"].read() == b"mine"
+
+    with pytest.raises(ClientError) as e:
+        service.delete_objects(Bucket="e2e-s3-missing", Delete={"Objects": [{"Key": "x"}]})
+    assert code(e) == "NoSuchBucket"
 
 
 def test_multipart_upload_through_the_transfer_manager(keys):

@@ -50,7 +50,7 @@ feature; `CHANGELOG.md` says when it arrived and lists known limitations.
 |---|---|---|
 | Buckets, RLS-decided access, signed URLs | ✅ | Size and MIME limits per bucket |
 | Resumable uploads (tus 1.0) | ✅ | |
-| S3-compatible API | 🟡 | No copy, batch delete, ACL or tagging; `aws-chunked` signatures are not verified |
+| S3-compatible API | 🟡 | Copy and batch delete, but no UploadPartCopy, ACL or tagging; `aws-chunked` signatures are not verified |
 | Image transformations | ✅ | Optional imgproxy service |
 
 ## Realtime

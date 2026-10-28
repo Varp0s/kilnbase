@@ -34,6 +34,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   is taken is refused rather than silently replaced.
 - **Logs**: core, auth, functions and Studio also write their JSON log lines to a per-service volume (10 MB,
   one rotation); Studio reads them read-only. Postgres, PostgREST and imgproxy still log to stderr only.
+- **S3 API**: CopyObject (within or across buckets, metadata `COPY` or `REPLACE`) and DeleteObjects (up to 1000
+  keys). RLS decides both as the caller: a copy needs read access to the source and write access to the target.
 
 ### Changed
 - **Releases**: an `edge` image channel, built from `main` every night once CI has passed on that commit (also
@@ -48,6 +50,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.
+- **S3 API**: UploadPartCopy answers `NotImplemented` instead of storing an empty part. Multipart completion
+  bodies are now checked against `x-amz-content-sha256`.
 
 ## [0.8.0] - 2026-10-27
 
