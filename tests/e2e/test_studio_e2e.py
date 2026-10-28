@@ -90,6 +90,7 @@ def test_user_list_has_no_secrets(client, keys):
     assert users and set(users[0]) == {
         "id",
         "email",
+        "phone",
         "created_at",
         "is_anonymous",
         "email_confirmed_at",
