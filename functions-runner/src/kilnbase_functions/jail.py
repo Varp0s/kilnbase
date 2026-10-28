@@ -130,6 +130,16 @@ async def _read(reader: asyncio.StreamReader, limit: int, kill_on_overflow) -> t
     return bytes(data), over
 
 
+def expendable() -> None:
+    """
+    Runs in the child before nsjail starts, and the jail inherits it: all jails share the
+    container's memory limit, and when it is hit the kernel should kill a function, not the runner.
+    Raising the score needs no privilege.
+    """
+    with open("/proc/self/oom_score_adj", "w") as f:
+        f.write("1000")
+
+
 async def run(config: Config, function_dir: Path, request: bytes) -> Outcome:
     loop = asyncio.get_running_loop()
     read_fd, write_fd = os.pipe()
@@ -140,6 +150,7 @@ async def run(config: Config, function_dir: Path, request: bytes) -> Outcome:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             pass_fds=(write_fd,),
+            preexec_fn=expendable,  # noqa: PLW1509 - writes one /proc file, no locks taken
         )
     except BaseException:
         os.close(read_fd)

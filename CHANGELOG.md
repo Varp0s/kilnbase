@@ -57,6 +57,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   from the request signature, and `x-amz-checksum-*` values (CRC32, CRC32C, CRC64/NVME, SHA-1, SHA-256, sent as a
   header or trailer) must match the stored bytes. A failed check stores nothing. SigV4a (ECDSA) streaming answers
   `NotImplemented`.
+- **Functions**: when calls together fill the functions container's memory (a fork bomb could), the kernel now
+  kills a sandboxed function instead of the runner, which took every function down until the container restarted.
 
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.
