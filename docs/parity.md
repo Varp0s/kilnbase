@@ -41,7 +41,7 @@ feature; `CHANGELOG.md` says when it arrived and lists known limitations.
 | SAML 2.0 SSO | ✅ | SP-initiated, each IdP limited to its own email domains |
 | MFA (TOTP) | ✅ | Can be required for every user |
 | Anonymous sign-in | ✅ | Opt-in; guests can be upgraded in place |
-| Phone / SMS sign-in | 🟡 | Codes through your own signed SMS hook; adding or changing a number is confirmed by a code. No phone + password sign-in |
+| Phone / SMS sign-in | ✅ | Codes through your own signed SMS hook; adding or changing a number is confirmed by a code; phone + password once a password is set |
 | Key rotation without downtime | ✅ | `kilnbase rotate-keys` |
 
 ## Storage

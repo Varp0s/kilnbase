@@ -32,10 +32,9 @@ export interface Factor {
   uri: string;
 }
 
-export interface Credentials {
-  email: string;
-  password: string;
-}
+export type Credentials = { email: string; password: string };
+/** A verified phone number (E.164) and a password the user set with `updateUser`. */
+export type PhoneCredentials = { phone: string; password: string };
 
 /** Anything shaped like `localStorage`; may be async. */
 export interface StorageAdapter {
@@ -135,7 +134,7 @@ export class AuthClient {
     return ok(session);
   }
 
-  signInWithPassword(credentials: Credentials): Promise<Result<Session>> {
+  signInWithPassword(credentials: Credentials | PhoneCredentials): Promise<Result<Session>> {
     return this.#obtain("/auth/v1/token?grant_type=password", credentials, "SIGNED_IN");
   }
 

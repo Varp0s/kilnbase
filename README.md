@@ -314,6 +314,9 @@ other sessions are signed out. This also keeps an anonymous user's account with 
 `kb.auth.updateUser({ phone, currentPassword })` then `kb.auth.confirmPhoneChange(code)`; email changes work the
 same with `updateUser({ email, currentPassword })` and `confirmEmailChange(code)` (Python: `update_user(...)`,
 `confirm_phone_change`, `confirm_email_change`).
+A phone user who sets a password (`PUT /auth/v1/user {"password"}`) can also sign in with
+`POST /auth/v1/token?grant_type=password {"phone", "password"}` (JS: `signInWithPassword({ phone, password })`,
+Python: `sign_in_with_password(phone=..., password=...)`), with the same rate limits as email sign-in.
 
 **Email confirmation and password reset.** With SMTP configured, password sign-ups get a confirmation mail
 (`POST /auth/v1/verify {"type":"signup", ...}`); access tokens carry `email_verified`, so a policy can require it:

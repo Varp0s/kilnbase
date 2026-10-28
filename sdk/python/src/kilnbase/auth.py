@@ -47,10 +47,12 @@ class AuthClient:
     def sign_up(self, email: str, password: str) -> dict[str, Any]:
         return self._obtain("/auth/v1/signup", {"email": email, "password": password})
 
-    def sign_in_with_password(self, email: str, password: str) -> dict[str, Any]:
-        return self._obtain(
-            "/auth/v1/token?grant_type=password", {"email": email, "password": password}
-        )
+    def sign_in_with_password(
+        self, email: str | None = None, password: str = "", *, phone: str | None = None
+    ) -> dict[str, Any]:
+        """`email`, or `phone=` (a verified number whose user set a password), and `password`."""
+        login = {"phone": phone} if phone is not None else {"email": email}
+        return self._obtain("/auth/v1/token?grant_type=password", login | {"password": password})
 
     def sign_in_anonymously(self) -> dict[str, Any]:
         """A guest account (must be enabled on the server); keep it later with `update_user`."""

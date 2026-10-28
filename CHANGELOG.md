@@ -14,6 +14,7 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   keep their account with just a phone.
 - **Clients**: the JS and Python clients change a user's email or phone (`updateUser({ email | phone })`, then
   `confirmEmailChange` / `confirmPhoneChange`); `password` is no longer required by `updateUser`.
+- **Auth**: password sign-in with a verified phone number instead of an email, once the user set a password.
 - **Studio**: table editor (browse rows a page at a time; insert, edit and delete rows of tables with a primary
   key, as service_role).
 - **Studio**: SQL editor (runs as the database superuser in one transaction, optionally rolled back; first

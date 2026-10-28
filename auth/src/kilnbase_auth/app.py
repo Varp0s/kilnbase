@@ -57,6 +57,11 @@ class Credentials(BaseModel):
     redirect_to: str | None = Field(default=None, max_length=2048)
 
 
+class PhoneCredentials(BaseModel):
+    phone: str = Field(max_length=32)
+    password: str = Field(max_length=1024)
+
+
 class RecoverRequest(BaseModel):
     email: str = Field(max_length=254)
     redirect_to: str | None = Field(default=None, max_length=2048)
@@ -324,14 +329,23 @@ def create_app(config: Config) -> FastAPI:
         )
 
     async def password_grant(request: Request):
+        """With email and password, or with a verified phone number and a password set later."""
         try:
-            body = Credentials.model_validate(await request.json())
+            raw = await request.json()
+            by_phone = isinstance(raw, dict) and "phone" in raw and "email" not in raw
+            body = (PhoneCredentials if by_phone else Credentials).model_validate(raw)
         except ValueError:
             return error(
                 422, "invalid_request", "request body is missing fields or has invalid ones"
             )
-        email = normalize_email(body.email) or body.email.strip().lower()
-        keys = [(email_limiter, f"email:{email}"), (ip_limiter, f"ip:{client_ip(request)}")]
+        if isinstance(body, PhoneCredentials):
+            login = normalize_phone(body.phone) or body.phone.strip()
+            lookup = "select id, email, password_hash from auth.users where phone = $1"
+        else:
+            login = normalize_email(body.email) or body.email.strip().lower()
+            lookup = "select id, email, password_hash from auth.users where lower(email) = $1"
+        # Same key as check_current_password, so both count against one budget per account.
+        keys = [(email_limiter, f"email:{login}"), (ip_limiter, f"ip:{client_ip(request)}")]
         for limiter, key in keys:
             if wait := limiter.retry_after(key):
                 return error(
@@ -342,9 +356,7 @@ def create_app(config: Config) -> FastAPI:
                 )
 
         async with app.state.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "select id, email, password_hash from auth.users where lower(email) = $1", email
-            )
+            row = await conn.fetchrow(lookup, login)
             try:
                 ok = await run_in_threadpool(
                     hasher.verify,
@@ -356,7 +368,7 @@ def create_app(config: Config) -> FastAPI:
             if not (row and row["password_hash"] and ok):
                 for limiter, key in keys:
                     limiter.fail(key)
-                return error(400, "invalid_credentials", "invalid email or password")
+                return error(400, "invalid_credentials", "invalid login or password")
 
             email_limiter.reset(keys[0][1])
             async with conn.transaction():

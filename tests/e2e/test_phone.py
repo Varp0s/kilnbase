@@ -198,3 +198,22 @@ def test_anonymous_user_keeps_their_account_with_a_phone(client, keys):
     assert r.json()["user"]["id"] == guest["user"]["id"]
     claims = jwt.decode(r.json()["access_token"], options={"verify_signature": False})
     assert claims["is_anonymous"] is False and claims["phone"] == phone
+
+
+def test_phone_and_password(client, keys):
+    phone = number()
+    token = sign_in(client, keys, phone)
+    password = "a phone user's passphrase"
+    r = client.put("/auth/v1/user", headers=bearer(keys, token), json={"password": password})
+    assert r.status_code == 204, r.text
+
+    h = {"apikey": keys.anon}
+    url = "/auth/v1/token?grant_type=password"
+    r = client.post(url, headers=h, json={"phone": phone, "password": password})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["phone"] == phone
+    wrong = client.post(url, headers=h, json={"phone": phone, "password": "not it at all"})
+    assert wrong.status_code == 400 and wrong.json()["code"] == "invalid_credentials"
+    # A number nobody verified signs in to nothing.
+    r = client.post(url, headers=h, json={"phone": number(), "password": password})
+    assert r.status_code == 400
