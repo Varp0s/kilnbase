@@ -3,12 +3,34 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # The edge channel: main, every night, once CI has passed on it.
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  edge-gate:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci --branch main \
+            --commit "$GITHUB_SHA" --event push --limit 1 --json conclusion -q '.[0].conclusion')
+          echo "ci on $GITHUB_SHA: ${conclusion:-none}"
+          test "$conclusion" = success
+
   images:
+    needs: edge-gate
+    # Tags skip the gate; scheduled and manual runs need it to pass.
+    if: always() && (needs.edge-gate.result == 'success' || github.event_name == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,6 +73,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=edge,enable=${{ github.event_name != 'push' }}
+            type=sha,prefix=edge-,enable=${{ github.event_name != 'push' }}
       - id: push
         uses: docker/build-push-action@v7.4.0
         with:
