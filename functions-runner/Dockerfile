@@ -22,6 +22,8 @@ COPY --from=nsjail /nsjail/nsjail /usr/local/bin/nsjail
 COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
 # Runs functions written in TypeScript (type stripping is built in).
 COPY --from=node:24.22.1-trixie-slim /usr/local/bin/node /usr/local/bin/node
+# npm only installs functions/package.json at boot, outside the jails.
+COPY --from=node:24.22.1-trixie-slim /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -32,7 +34,9 @@ COPY functions-runner ./functions-runner
 COPY cli/pyproject.toml ./cli/pyproject.toml
 COPY studio/pyproject.toml ./studio/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-functions \
-    && useradd --system --uid 10001 kilnbase     && mkdir /deps /logs && chown kilnbase /deps /logs
+    && useradd --system --uid 10001 kilnbase     && mkdir /deps /logs && chown kilnbase /deps /logs \
+    # The mount point for functions' npm packages inside each jail; empty here.
+    && mkdir /node_modules
 USER kilnbase
 EXPOSE 9000
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "kilnbase_functions"]

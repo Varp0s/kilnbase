@@ -121,6 +121,12 @@ def test_packages_from_requirements_are_importable(client, keys):
     assert r.json() == {"six": "1.17.0", "path": "/opt/six.py"}
 
 
+def test_npm_packages_are_importable(client, keys):
+    r = call(client, keys, "node-deps")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ms": 172800000, "path": "file:///node_modules/ms/index.js"}
+
+
 def test_secrets_reach_only_their_function(client, keys):
     r = call(client, keys, "secret")
     assert r.status_code == 200, r.text

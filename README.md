@@ -50,8 +50,10 @@ export async function handler(request: { query: Record<string, string>; user: { 
 
 The memory limit bounds the JS heap and everything else the function allocates (V8 reserves about 1.2 GB of
 address space up front, which is added to the limit and never used). Worker threads are not available, and a
-function that fills its heap is ended by the time limit, as Node takes seconds to exit. npm packages are not
-installed yet.
+function that fills its heap may be ended by the time limit, as Node can take seconds to exit. npm packages come
+from `functions/package.json` with its `package-lock.json` (required), installed at start with `npm ci
+--ignore-scripts`: install scripts would run outside any sandbox, so packages that build native code that way do
+not work (prebuilt binaries shipped as optional dependencies do).
 
 Every call runs in its own [nsjail](https://github.com/google/nsjail) sandbox: separate user, PID and mount
 namespaces, a read-only root without the other functions, a private `/tmp`, a syscall filter that blocks new

@@ -18,6 +18,7 @@ LOG_LIMIT = 16 * 1024
 JAIL_TMP = "/tmp"  # noqa: S108 - a private tmpfs inside each jail
 MOUNT = "/mnt"  # exists in the read-only root; the function's directory is bound here
 DEPS_MOUNT = "/opt"  # likewise for the packages from functions/requirements.txt
+NODE_MODULES = "/node_modules"  # an empty directory in the image; Node looks there from /mnt
 
 
 SECRET_LINE = re.compile(r"(\*|[a-z0-9_-]{1,63})\.([A-Z_][A-Z0-9_]*)=(.*)")
@@ -70,6 +71,13 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "LANG": "C.UTF-8",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
     }
+    mounts = []
+    if deps := config.deps_dir or config.node_deps_dir:
+        mounts += ["--tmpfsmount", str(deps.parent)]  # the other sets and the package caches
+    if config.deps_dir:
+        mounts += ["--bindmount_ro", f"{config.deps_dir}:{DEPS_MOUNT}"]
+    if config.node_deps_dir:
+        mounts += ["--bindmount_ro", f"{config.node_deps_dir / 'node_modules'}:{NODE_MODULES}"]
     if (function_dir / "main.ts").is_file():
         memory_mb = NODE_RESERVED_MB + config.memory_mb
         command = [
@@ -91,8 +99,7 @@ def argv(config: Config, function_dir: Path, response_fd: int) -> list[str]:
         "--disable_clone_newnet",
         "--tmpfsmount", JAIL_TMP,
         "--tmpfsmount", str(config.functions_dir),
-        *(["--tmpfsmount", str(config.deps_dir.parent)] if config.deps_dir else []),
-        *(["--bindmount_ro", f"{config.deps_dir}:{DEPS_MOUNT}"] if config.deps_dir else []),
+        *mounts,
         "--bindmount_ro", f"{function_dir}:{MOUNT}",
         "--cwd", MOUNT,
         "--time_limit", str(config.timeout),

@@ -44,7 +44,11 @@ def main() -> None:
         log.error("%s", e)
         sys.exit(1)
     try:
-        config = replace(config, deps_dir=deps.install(config.functions_dir))
+        config = replace(
+            config,
+            deps_dir=deps.install(config.functions_dir),
+            node_deps_dir=deps.install_node(config.functions_dir),
+        )
     except deps.DepsError as e:
         log.error("%s", e)
         sys.exit(1)

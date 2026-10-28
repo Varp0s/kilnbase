@@ -25,6 +25,8 @@ class Config:
     concurrency: int = 8
     # Where functions/requirements.txt was installed (set at boot), bound into every jail.
     deps_dir: Path | None = None
+    # Where functions/package.json was installed (set at boot); its node_modules is bound likewise.
+    node_deps_dir: Path | None = None
 
 
 def _int(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
