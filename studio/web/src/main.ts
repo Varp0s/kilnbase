@@ -44,6 +44,7 @@ const ICONS: Record<string, string[]> = {
   copy: ["M9 9h11v11H9z", "M5 15V5a1 1 0 0 1 1-1h9"],
   table: ["M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 10h18M9 10v10"],
   users: ["M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M2 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1", "M16 3.5a4 4 0 0 1 0 8M22 20v-1a5 5 0 0 0-3.5-4.8"],
+  clock: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 7v5l3 2"],
   bolt: ["M13 2L4 14h7l-1 8 9-12h-7z"],
   alert: ["M12 3l10 18H2z", "M12 10v5M12 18h.01"],
   check: ["M5 12l5 5L20 7"],
@@ -116,6 +117,12 @@ interface Webhook {
   pending: number; failed: number; created_at: string;
 }
 interface Delivery { id: number; webhook: string; status: string; attempts: number; last_status: number | null; last_error: string | null; created_at: string }
+interface CronJob {
+  jobid: number; name: string | null; schedule: string; command: string; active: boolean; username: string;
+  last_status: string | null; last_run: string | null;
+}
+interface CronRun { runid: number; job: string; status: string; return_message: string | null; start_time: string | null; end_time: string | null }
+interface CronInfo { enabled: boolean; jobs: CronJob[]; runs: CronRun[] }
 interface Extension { name: string; default_version: string; installed_version: string | null; comment: string | null; schema: string | null }
 interface DatabaseInfo {
   version: string; bytes: number; connections: number; max_connections: number; tables: number;
@@ -712,6 +719,77 @@ const views: Record<string, () => Promise<Node[]>> = {
       grid(["id", "webhook", "status", "attempts", "HTTP", "last error", "queued", ""], deliveryRows, "No deliveries yet."),
     ];
   },
+  async cron() {
+    const info = await api<CronInfo>("/api/cron");
+    const message = el("p", { className: "hint" });
+    if (!info.enabled) {
+      const enable = el("button", { type: "button" }, "Enable pg_cron");
+      enable.addEventListener("click", () => {
+        api("/api/extensions/pg_cron/enable", {}).then(() => { toast("pg_cron enabled"); void show("cron"); })
+          .catch((err: unknown) => fail(err, message));
+      });
+      return [emptyState(icon("clock"), "pg_cron is not enabled", "Scheduled jobs need the pg_cron extension."), enable, message];
+    }
+    const act = async (name: string, action: string) => {
+      if (action === "delete" && !(await confirmDialog("Delete job?", `Unschedule ${name}? Its run history is kept.`, { confirmLabel: "Delete", danger: true }))) return;
+      api(`/api/cron/${encodeURIComponent(name)}/${action}`, {}).then(() => { toast("Done"); void show("cron"); })
+        .catch((err: unknown) => fail(err, message));
+    };
+    const status = (s: string | null) => el("span", { className: s === "failed" ? "error" : s === "succeeded" ? "ok" : "hint" }, s ?? "never run");
+
+    const jobRows = info.jobs.map((j) => {
+      const actions = el("td", { className: "actions" });
+      // Jobs scheduled without a name (cron.schedule(schedule, command)) are managed in SQL.
+      if (j.name !== null) {
+        const name = j.name;
+        const toggle = el("button", { type: "button" }, j.active ? "Disable" : "Enable");
+        toggle.addEventListener("click", () => void act(name, j.active ? "disable" : "enable"));
+        const del = el("button", { type: "button", className: "danger" }, "Delete");
+        del.addEventListener("click", () => void act(name, "delete"));
+        actions.append(toggle, del);
+      }
+      return el("tr", {},
+        el("td", {}, j.name ?? `#${j.jobid}`), el("td", {}, el("code", {}, j.schedule)),
+        el("td", {}, el("code", {}, j.command)), el("td", {}, j.username),
+        el("td", {}, j.active ? el("span", { className: "ok" }, "on") : el("span", { className: "hint" }, "off")),
+        el("td", { title: j.last_run ?? "" }, status(j.last_status), j.last_run ? ` · ${new Date(j.last_run).toLocaleString()}` : ""),
+        actions);
+    });
+    const runRows = info.runs.map((r) => el("tr", {},
+      el("td", {}, String(r.runid)), el("td", {}, r.job), el("td", {}, status(r.status)),
+      el("td", {}, el("code", {}, r.return_message ?? "")),
+      el("td", { title: r.start_time ?? "" }, r.start_time ? new Date(r.start_time).toLocaleString() : ""),
+      el("td", {}, r.start_time && r.end_time ? `${Date.parse(r.end_time) - Date.parse(r.start_time)} ms` : "")));
+
+    const name = el("input", { id: "cron-name", required: true, placeholder: "nightly-cleanup" });
+    const schedule = el("input", { id: "cron-schedule", required: true, placeholder: "0 3 * * *" });
+    const command = el("textarea", { id: "cron-command", rows: 3, required: true, spellcheck: false, placeholder: "delete from public.sessions where expires_at < now();" });
+    const formMessage = el("div");
+    const create = el("form", {},
+      el("label", { htmlFor: "cron-name" }, "New job"), name,
+      el("label", { htmlFor: "cron-schedule" }, "schedule (cron, UTC, or \"30 seconds\")"), schedule,
+      el("label", { htmlFor: "cron-command" }, "SQL"), command,
+      el("button", { type: "submit" }, "Schedule"));
+    create.addEventListener("submit", (e) => {
+      e.preventDefault();
+      api("/api/cron", { name: name.value, schedule: schedule.value, command: command.value })
+        .then(() => { toast(`Job ${name.value} scheduled`); void show("cron"); })
+        .catch((err: unknown) => fail(err, formMessage));
+    });
+
+    const grid = (head: string[], rows: HTMLElement[], empty: string) => rows.length
+      ? el("div", { className: "scroll" }, el("table", {}, el("thead", {}, el("tr", {}, ...head.map((h) => el("th", {}, h)))), el("tbody", {}, ...rows)))
+      : emptyState(icon("clock"), empty);
+    return [
+      create, formMessage,
+      el("p", { className: "hint" }, "Jobs created here run as the database superuser, like the SQL editor."),
+      message,
+      el("h2", {}, "Jobs"),
+      grid(["name", "schedule", "command", "runs as", "", "last run", ""], jobRows, "No jobs yet."),
+      el("h2", {}, "Newest runs"),
+      grid(["run", "job", "status", "message", "started", "took"], runRows, "No runs yet."),
+    ];
+  },
 };
 
 function fail(err: unknown, target: HTMLElement): void {
@@ -728,6 +806,7 @@ const SUBTITLES: Record<string, string> = {
   users: "Everyone who can sign in.",
   viewas: "See a table exactly as one user, or anon, sees it through the API.",
   storage: "Buckets and the files in them.",
+  cron: "SQL that runs on a schedule, with pg_cron.",
   webhooks: "HTTP calls fired by table changes, and their delivery log.",
   logs: "Recent log lines from the Kilnbase services.",
   connect: "What an app needs to talk to this project.",

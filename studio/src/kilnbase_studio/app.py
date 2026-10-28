@@ -213,6 +213,36 @@ class NewWebhook(BaseModel):
     url: str = Field(pattern=r"^https?://", max_length=2048)
 
 
+CRON_ENABLED_SQL = "select exists (select from pg_extension where extname = 'pg_cron')"
+CRON_JOBS_SQL = """
+select j.jobid, j.jobname as name, j.schedule, j.command, j.active, j.username,
+       r.status as last_status, r.start_time as last_run
+  from cron.job j
+  left join lateral (select status, start_time from cron.job_run_details
+                      where jobid = j.jobid order by runid desc limit 1) r on true
+ order by j.jobname nulls last, j.jobid
+"""
+CRON_RUNS_SQL = """
+select r.runid, coalesce(j.jobname, r.jobid::text) as job, r.status, r.return_message,
+       r.start_time, r.end_time
+  from cron.job_run_details r left join cron.job j on j.jobid = r.jobid
+ order by r.runid desc limit 50
+"""
+CRON_ACTIONS = {
+    "enable": "select cron.alter_job(jobid, active := true) from cron.job where jobname = $1",
+    "disable": "select cron.alter_job(jobid, active := false) from cron.job where jobname = $1",
+    # By id: unschedule(name) only finds jobs owned by the calling role.
+    "delete": "select cron.unschedule(jobid) from cron.job where jobname = $1",
+}
+
+
+class NewCronJob(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    # Five cron fields, or pg_cron's '<n> seconds'; pg_cron itself rejects a bad one.
+    schedule: str = Field(min_length=1, max_length=100)
+    command: str = Field(min_length=1, max_length=100_000)
+
+
 class NewBucket(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,62}$")
     public: bool = False
@@ -492,6 +522,48 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/webhook-deliveries", dependencies=[Depends(admin)])
     async def deliveries() -> list[dict]:
         return [dict(r) for r in await app.state.pool.fetch(DELIVERIES_SQL)]
+
+    @app.get("/api/cron", dependencies=[Depends(admin)])
+    async def cron():
+        async with app.state.pool.acquire() as conn:
+            if not await conn.fetchval(CRON_ENABLED_SQL):
+                return {"enabled": False, "jobs": [], "runs": []}
+            jobs = [
+                dict(r) | {"command": cell(r["command"])} for r in await conn.fetch(CRON_JOBS_SQL)
+            ]
+            runs = [
+                dict(r) | {"return_message": cell(r["return_message"])}
+                for r in await conn.fetch(CRON_RUNS_SQL)
+            ]
+        return {"enabled": True, "jobs": jobs, "runs": runs}
+
+    @app.post("/api/cron", dependencies=[Depends(admin)])
+    async def create_cron_job(body: NewCronJob):
+        async with app.state.pool.acquire() as conn:
+            if not await conn.fetchval(CRON_ENABLED_SQL):
+                return error(409, "conflict", "enable the pg_cron extension first")
+            # cron.schedule replaces a job of the same name; here that has to be asked for.
+            if await conn.fetchval("select 1 from cron.job where jobname = $1", body.name):
+                return error(409, "conflict", "a job with that name exists")
+            try:
+                await conn.execute(
+                    "select cron.schedule($1, $2, $3)", body.name, body.schedule, body.command
+                )
+            except asyncpg.PostgresError as e:
+                return error(400, "database_error", str(e))
+        return {"ok": True}
+
+    @app.post("/api/cron/{name}/{action}", dependencies=[Depends(admin)])
+    async def cron_action(name: str, action: str):
+        sql = CRON_ACTIONS.get(action)
+        if sql is None:
+            return error(400, "invalid_request", "action is enable, disable or delete")
+        async with app.state.pool.acquire() as conn:
+            if not await conn.fetchval(CRON_ENABLED_SQL):
+                return error(404, "not_found", "no such job")
+            if not await conn.fetch(sql, name):
+                return error(404, "not_found", "no such job")
+        return {"ok": True}
 
     @app.post("/api/view-as", dependencies=[Depends(admin)])
     async def view_as(body: ViewAs):

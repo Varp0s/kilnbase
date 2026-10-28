@@ -317,6 +317,39 @@ def test_database_overview_and_extensions(keys):
     assert act("citext", "upgrade").status_code == 400
 
 
+def test_cron_jobs(keys):
+    h = admin(keys)
+    was_enabled = httpx.get(f"{STUDIO}/api/cron", headers=h).json()["enabled"]
+    if not was_enabled:
+        no_cron = {"name": "x", "schedule": "* * * * *", "command": "select 1"}
+        assert httpx.post(f"{STUDIO}/api/cron", headers=h, json=no_cron).status_code == 409
+        assert httpx.post(f"{STUDIO}/api/extensions/pg_cron/enable", headers=h).status_code == 200
+    name = f"e2e-{uuid.uuid4().hex[:8]}"
+    try:
+        job = {"name": name, "schedule": "0 3 * * *", "command": "select 1"}
+        assert httpx.post(f"{STUDIO}/api/cron", headers=h, json=job).status_code == 200
+        # cron.schedule would silently replace it.
+        assert httpx.post(f"{STUDIO}/api/cron", headers=h, json=job).status_code == 409
+        bad = job | {"name": f"{name}-bad", "schedule": "every tuesday"}
+        r = httpx.post(f"{STUDIO}/api/cron", headers=h, json=bad)
+        assert r.status_code == 400 and r.json()["code"] == "database_error"
+
+        def listed():
+            jobs = httpx.get(f"{STUDIO}/api/cron", headers=h).json()["jobs"]
+            return next(j for j in jobs if j["name"] == name)
+
+        assert listed()["active"] and listed()["schedule"] == "0 3 * * *"
+        assert httpx.post(f"{STUDIO}/api/cron/{name}/disable", headers=h).status_code == 200
+        assert not listed()["active"]
+        assert httpx.post(f"{STUDIO}/api/cron/{name}/run", headers=h).status_code == 400
+        assert httpx.post(f"{STUDIO}/api/cron/{name}/delete", headers=h).status_code == 200
+        assert httpx.post(f"{STUDIO}/api/cron/{name}/delete", headers=h).status_code == 404
+    finally:
+        httpx.post(f"{STUDIO}/api/cron/{name}/delete", headers=h)
+        if not was_enabled:
+            httpx.post(f"{STUDIO}/api/extensions/pg_cron/disable", headers=h)
+
+
 def test_connect_page_shows_only_public_values(keys):
     info = httpx.get(f"{STUDIO}/api/connect", headers=admin(keys)).json()
     assert info == {"url": "http://localhost:8000", "anon_key": keys.anon}
