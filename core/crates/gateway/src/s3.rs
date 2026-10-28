@@ -823,6 +823,13 @@ fn no_such_key() -> S3Error {
     )
 }
 
+/// `(start, len)` for an `x-amz-copy-source-range`, which must name both ends inside the source.
+fn copy_range(raw: &str, size: u64) -> Option<(u64, u64)> {
+    let (a, b) = raw.strip_prefix("bytes=")?.split_once('-')?;
+    let (a, b) = (a.parse::<u64>().ok()?, b.parse::<u64>().ok()?);
+    (a <= b && b < size).then(|| (a, b - a + 1))
+}
+
 /// `(start, len)` for a single `bytes=` range; `None` serves the whole object, as HTTP allows
 /// for ranges a server does not understand.
 fn parse_range(raw: &str, size: u64) -> Result<Option<(u64, u64)>, S3Error> {
@@ -974,21 +981,35 @@ async fn put_object(
     Ok(res)
 }
 
-/// CopyObject. The source is read and the target written as the caller, so RLS decides both.
-async fn copy_object(
+/// Whether an If-Match style list (`*`, or quoted ETags) names the object with this id.
+fn etag_matches(list: &str, id: &str) -> bool {
+    list.split(',')
+        .map(|t| t.trim().trim_start_matches("W/").trim_matches('"'))
+        .any(|t| t == "*" || t == id)
+}
+
+struct Source {
+    id: String,
+    mime: String,
+    size: u64,
+    modified: String,
+}
+
+/// The object `x-amz-copy-source` names, read as the caller so RLS decides.
+async fn copy_source(
     st: &AppState,
     caller: &Caller,
-    t: &Target,
     headers: &HeaderMap,
-) -> Result<Response, S3Error> {
-    t.only_params(&[])?;
-    let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
-    let source = header("x-amz-copy-source").unwrap_or("");
-    // A `?versionId=` or a conditional copy would need versions and preconditions we don't keep.
+) -> Result<Source, S3Error> {
+    let source = headers
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // `?versionId=` and date preconditions would need history we don't keep; ETags we have.
     if source.contains('?')
-        || headers
-            .keys()
-            .any(|k| k.as_str().starts_with("x-amz-copy-source-if-"))
+        || headers.keys().any(|k| {
+            k.as_str().starts_with("x-amz-copy-source-if-") && !k.as_str().ends_with("-match")
+        })
     {
         return Err(not_implemented());
     }
@@ -1002,19 +1023,53 @@ async fn copy_object(
                 "x-amz-copy-source must be bucket/key",
             )
         })?;
-    let row = {
-        let mut client = db::client(&st.storage.pool).await?;
-        let tx = db::begin_as(&mut client, caller).await?;
-        tx.query_opt(
-            "select id::text, mime_type from storage.objects where bucket_id = $1 and name = $2",
-            &[&src_bucket, &src_key],
-        )
+    let mut client = db::client(&st.storage.pool).await?;
+    let tx = db::begin_as(&mut client, caller).await?;
+    let sql = format!(
+        "select id::text, mime_type, size, {ISO_DATE} from storage.objects
+          where bucket_id = $1 and name = $2"
+    );
+    let row = tx
+        .query_opt(&sql, &[&src_bucket, &src_key])
         .await
         .map_err(db::internal)?
-        .ok_or_else(no_such_key)?
+        .ok_or_else(no_such_key)?;
+    let id: String = row.get(0);
+    let matches = |name: &str| {
+        let value = headers.get(name)?.to_str().ok()?;
+        Some(etag_matches(value, &id))
     };
-    let (src_id, mut mime): (String, String) = (row.get(0), row.get(1));
-    if header("x-amz-metadata-directive") == Some("REPLACE") {
+    if matches("x-amz-copy-source-if-match") == Some(false)
+        || matches("x-amz-copy-source-if-none-match") == Some(true)
+    {
+        return Err(err(
+            StatusCode::PRECONDITION_FAILED,
+            "PreconditionFailed",
+            "the copy source does not meet the precondition",
+        ));
+    }
+    Ok(Source {
+        id,
+        mime: row.get(1),
+        size: row.get::<_, i64>(2) as u64,
+        modified: row.get(3),
+    })
+}
+
+/// CopyObject. The source is read and the target written as the caller, so RLS decides both.
+async fn copy_object(
+    st: &AppState,
+    caller: &Caller,
+    t: &Target,
+    headers: &HeaderMap,
+) -> Result<Response, S3Error> {
+    t.only_params(&[])?;
+    let src = copy_source(st, caller, headers).await?;
+    let mut mime = src.mime;
+    if headers
+        .get("x-amz-metadata-directive")
+        .is_some_and(|v| v == "REPLACE")
+    {
         mime = storage::mime_essence(headers.get(header::CONTENT_TYPE))
             .ok_or_else(|| bad_request("invalid content-type"))?;
     }
@@ -1026,7 +1081,7 @@ async fn copy_object(
     };
     let limit = object.limit(&st.storage).await?;
     // A source deleted meanwhile surfaces as `not_found`, i.e. NoSuchKey.
-    let copied = storage::assemble(&st.storage, &[st.storage.object_path(&src_id)], limit).await?;
+    let copied = storage::assemble(&st.storage, &[st.storage.object_path(&src.id)], limit).await?;
     let id = object
         .store(&st.storage, caller, copied.size, &copied.path)
         .await?;
@@ -1300,10 +1355,6 @@ async fn upload_part(
 ) -> Result<Response, S3Error> {
     let checked = async {
         t.only_params(&["partNumber", "uploadId"])?;
-        // UploadPartCopy is not implemented; without this the empty body would become the part.
-        if headers.contains_key("x-amz-copy-source") {
-            return Err(not_implemented());
-        }
         let part = t
             .param("partNumber")
             .and_then(|v| v.parse::<u32>().ok())
@@ -1326,13 +1377,53 @@ async fn upload_part(
         Ok(v) => v,
         Err(e) => return Err(storage::drain(body, e).await),
     };
-    let received = receive_payload(st, headers, body, limit).await?;
+    let copied = if headers.contains_key("x-amz-copy-source") {
+        Some(copy_source(st, caller, headers).await?)
+    } else {
+        None
+    };
+    let received = match &copied {
+        None => receive_payload(st, headers, body, limit).await?,
+        // UploadPartCopy: the part is (a range of) a stored object instead of the body.
+        Some(src) => {
+            let (start, len) = match headers.get("x-amz-copy-source-range") {
+                None => (0, src.size),
+                Some(v) => v
+                    .to_str()
+                    .ok()
+                    .and_then(|v| copy_range(v, src.size))
+                    .ok_or_else(|| {
+                        err(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidArgument",
+                            "x-amz-copy-source-range must be bytes=first-last within the source",
+                        )
+                    })?,
+            };
+            let mut file = match tokio::fs::File::open(st.storage.object_path(&src.id)).await {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(no_such_key()),
+                Err(e) => return Err(io_error(e)),
+            };
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(io_error)?;
+            let body = Body::from_stream(ReaderStream::new(file.take(len)));
+            storage::receive(&st.storage, body, limit, Ok).await?
+        }
+    };
     // Fails if the upload was completed or aborted meanwhile; the temp file is then dropped.
     tokio::fs::rename(&received.path, dir.join(format!("part-{part:05}")))
         .await
         .map_err(|_| no_such_upload())?;
     let size = received.size;
     received.keep();
+    if let Some(src) = copied {
+        return Ok(xml_response(format!(
+            r#"<CopyPartResult xmlns="{XMLNS}"><LastModified>{}</LastModified><ETag>&quot;{part}-{size}&quot;</ETag></CopyPartResult>"#,
+            src.modified
+        )));
+    }
     let mut res = StatusCode::OK.into_response();
     if let Ok(v) = HeaderValue::from_str(&format!("\"{part}-{size}\"")) {
         res.headers_mut().insert(header::ETAG, v);
@@ -1591,6 +1682,13 @@ mod tests {
         assert_eq!(parse_range("bytes=0-1,5-6", 100).ok().flatten(), None);
         assert_eq!(parse_range("items=0-1", 100).ok().flatten(), None);
         assert!(parse_range("bytes=100-", 100).is_err());
+        assert_eq!(copy_range("bytes=0-99", 100), Some((0, 100)));
+        assert!(etag_matches("\"x\"", "x") && etag_matches("\"a\", W/\"x\"", "x"));
+        assert!(etag_matches("*", "x") && !etag_matches("\"y\"", "x"));
+        assert_eq!(copy_range("bytes=10-10", 100), Some((10, 1)));
+        for bad in ["bytes=0-100", "bytes=5-4", "bytes=-5", "bytes=5-", "0-5"] {
+            assert_eq!(copy_range(bad, 100), None, "{bad}");
+        }
     }
 
     #[test]

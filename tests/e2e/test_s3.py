@@ -216,6 +216,44 @@ def test_copy_object(service, keys):
     assert code(e) == "NoSuchKey"
 
 
+def test_multipart_copy(keys):
+    a, b = user_client(keys), user_client(keys)
+    src, dst = f"{uuid.uuid4().hex}/src.bin", f"{uuid.uuid4().hex}/dst.bin"
+    data = os.urandom(11 * 1024 * 1024)
+    a.put_object(Bucket="e2e-s3", Key=src, Body=data)
+
+    # Above the threshold the transfer manager copies with ranged UploadPartCopy calls.
+    config = TransferConfig(
+        multipart_threshold=5 * 1024 * 1024, multipart_chunksize=5 * 1024 * 1024
+    )
+    a.copy({"Bucket": "e2e-s3", "Key": src}, "e2e-s3", dst, Config=config)
+    assert a.get_object(Bucket="e2e-s3", Key=dst)["Body"].read() == data
+    with pytest.raises(ClientError) as e:
+        a.copy_object(
+            Bucket="e2e-s3", Key=dst, CopySource=f"e2e-s3/{src}", CopySourceIfMatch='"stale"'
+        )
+    assert code(e) == "PreconditionFailed"
+
+    theirs = f"{uuid.uuid4().hex}.bin"
+    upload = b.create_multipart_upload(Bucket="e2e-s3", Key=theirs)["UploadId"]
+    with pytest.raises(ClientError) as e:
+        b.upload_part_copy(
+            Bucket="e2e-s3", Key=theirs, UploadId=upload, PartNumber=1, CopySource=f"e2e-s3/{src}"
+        )
+    assert code(e) == "NoSuchKey"
+    upload = a.create_multipart_upload(Bucket="e2e-s3", Key=dst)["UploadId"]
+    with pytest.raises(ClientError) as e:
+        a.upload_part_copy(
+            Bucket="e2e-s3",
+            Key=dst,
+            UploadId=upload,
+            PartNumber=1,
+            CopySource=f"e2e-s3/{src}",
+            CopySourceRange=f"bytes=0-{len(data)}",
+        )
+    assert code(e) == "InvalidArgument"
+
+
 def test_delete_objects(service, keys):
     root = uuid.uuid4().hex
     names = [f"{root}/a.txt", f"{root}/b & <c>.txt", f'{root}/it\'s "quoted".txt']
