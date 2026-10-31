@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::jwk::JwkSet;
@@ -23,6 +24,8 @@ pub struct Config {
     pub s3_keys: Option<(String, String)>,
     /// `None` means any origin.
     pub cors_origins: Option<Vec<String>>,
+    /// Peers whose `x-forwarded-for` is believed (a TLS proxy in front); empty trusts nobody.
+    pub trusted_proxies: Vec<Cidr>,
     /// Verification keys by `kid`; the gateway never holds a signing key.
     pub keys: HashMap<String, DecodingKey>,
 }
@@ -79,6 +82,13 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
                 .collect(),
         ),
     };
+    let trusted_proxies = get("KILNBASE_TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Cidr::parse)
+        .collect::<Result<Vec<_>, _>>()?;
     let imgproxy_url = get("KILNBASE_IMGPROXY_URL")
         .map(|u| u.trim().trim_end_matches('/').to_owned())
         .filter(|u| !u.is_empty());
@@ -123,8 +133,57 @@ pub fn load(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
         s3_region,
         s3_keys,
         cors_origins,
+        trusted_proxies,
         keys,
     })
+}
+
+/// An address range such as `10.0.0.0/8` or `::1`; a bare address is a single host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cidr {
+    net: u128,
+    mask: u128,
+    v4: bool,
+}
+
+impl Cidr {
+    pub fn parse(text: &str) -> Result<Cidr, String> {
+        let bad = || format!("KILNBASE_TRUSTED_PROXIES: not an IP address or CIDR range: {text}");
+        let (addr, prefix) = match text.split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (text, None),
+        };
+        let ip: IpAddr = addr.trim().parse().map_err(|_| bad())?;
+        let (net, v4) = bits(ip);
+        let full: u32 = if v4 { 32 } else { 128 };
+        let len = match prefix {
+            None => full,
+            Some(p) => p
+                .trim()
+                .parse()
+                .ok()
+                .filter(|l| *l <= full)
+                .ok_or_else(bad)?,
+        };
+        let mask = if len == 0 { 0 } else { !0u128 << (full - len) };
+        Ok(Cidr {
+            net: net & mask,
+            mask,
+            v4,
+        })
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let (ip, v4) = bits(ip);
+        v4 == self.v4 && ip & self.mask == self.net
+    }
+}
+
+fn bits(ip: IpAddr) -> (u128, bool) {
+    match ip {
+        IpAddr::V4(v4) => (u128::from(u32::from(v4)), true),
+        IpAddr::V6(v6) => (u128::from(v6), false),
+    }
 }
 
 fn required(get: &impl Fn(&str) -> Option<String>, name: &str) -> Result<String, String> {

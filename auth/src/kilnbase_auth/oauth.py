@@ -80,7 +80,9 @@ def redirect_allowed(url: str, allowed: list[str]) -> bool:
     """Exact match or a path under an allowed base; `https://app.com` never admits `https://app.com.evil`."""
     parts = urlsplit(url)
     if (
-        parts.scheme not in ("http", "https")
+        # urlsplit drops newlines and tabs; the raw value goes into mails and Location headers.
+        any(c.isspace() or not c.isprintable() for c in url)
+        or parts.scheme not in ("http", "https")
         or not parts.netloc
         or parts.username
         or parts.password

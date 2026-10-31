@@ -53,6 +53,22 @@ until 1.0, minor releases may contain breaking changes, always called out below.
   states, a light / dark / system theme switch, and the Inter typeface served by Studio itself.
 
 ### Security
+- **Auth**: signing up with someone else's address no longer lets the attacker keep a foothold. When the
+  address owner later proves it (magic link, code, password reset, or a provider sign-in with a verified
+  email) on a still-unconfirmed account, that account's password is dropped and its sessions are revoked.
+- **Auth**: `/otp` and `/recover` spend the same per-address limit whether or not an account exists, and
+  changing your email is limited before the address is looked up, so a 429 cannot reveal accounts.
+- **Auth**: `redirect_to` values containing whitespace or control characters are refused; they passed URL
+  parsing and ended up verbatim in the mails sent to the address.
+- **Gateway**: `KILNBASE_TRUSTED_PROXIES` names the TLS proxy whose `X-Forwarded-For` is believed. For
+  every upstream (auth, PostgREST, functions, GraphQL) the client address is now set by core and all other
+  forwarding headers are dropped, so a caller cannot spoof them into `request.headers`.
+- **Realtime**: the per-connection message budget (50 a second) now covers every message, including
+  `join` and `subscribe`, which each cost a query as the caller; a resume with `since` spends the rest of
+  the second's budget. Denied channel authorisations are no longer cached per made-up channel name, and
+  a connection whose token expired stops receiving channel traffic, not only table changes.
+- **Functions**: the container's process limit now leaves room for the runner when every concurrent
+  sandbox hits its own process limit.
 - **S3 API**: streamed (`aws-chunked`) uploads are verified: every chunk signature and a signed trailer must chain
   from the request signature, and `x-amz-checksum-*` values (CRC32, CRC32C, CRC64/NVME, SHA-1, SHA-256, sent as a
   header or trailer) must match the stored bytes. A failed check stores nothing. SigV4a (ECDSA) streaming answers

@@ -89,6 +89,8 @@ services:
       KILNBASE_STORAGE_SIGNING_KEY: ${KILNBASE_STORAGE_SIGNING_KEY:?run `kilnbase init` first}
       # Comma-separated list of allowed browser origins, or * for any.
       KILNBASE_CORS_ORIGINS: ${KILNBASE_CORS_ORIGINS:-*}
+      # Addresses or CIDR ranges of a TLS proxy in front; only their X-Forwarded-For is believed.
+      KILNBASE_TRUSTED_PROXIES: ${KILNBASE_TRUSTED_PROXIES:-}
       # Image transformations: set to http://imgproxy:8080 and start with COMPOSE_PROFILES=images.
       KILNBASE_IMGPROXY_URL: ${KILNBASE_IMGPROXY_URL:-}
       # Functions: set to http://functions:9000 and start with COMPOSE_PROFILES=functions.
@@ -164,7 +166,8 @@ services:
       - seccomp=./functions-runner/seccomp.json
       - apparmor=unconfined
     mem_limit: 1g
-    pids_limit: 512
+    # Eight concurrent jails of 64 processes each, plus the runner itself.
+    pids_limit: 768
 
   # Optional admin dashboard: COMPOSE_PROFILES=studio. Published on 127.0.0.1 only; reach it from
   # elsewhere through an SSH tunnel, never through core or a public port.

@@ -7,6 +7,7 @@ import httpx2 as httpx
 import jwt
 import pyotp
 import pytest
+from conftest import psql
 
 MAILPIT = "http://localhost:8025"
 APP = "http://localhost:3000/callback"
@@ -117,6 +118,42 @@ def test_password_reset_signs_out_everywhere(client, keys):
         json={"password": "third passphrase"},
     )
     assert r.json()["code"] == "invalid_credentials"
+
+
+def test_unconfirmed_signup_cannot_hold_an_address(client, keys):
+    """An attacker pre-registers the victim's address; the victim's magic link evicts them."""
+    email, attacker = signup(client, keys)
+    r = client.post("/auth/v1/otp", headers=api(keys), json={"email": email})
+    assert r.json() == {"sent": True}
+    code = code_in(mails(email, "Your sign-in code"))
+    r = verify(client, keys, type="email", email=email, token=code)
+    assert r.status_code == 200, r.text
+    assert claims(r.json())["email_verified"] is True
+    # The attacker's password and session are gone; only the address owner is signed in.
+    assert sign_in(client, keys, email, PASSWORD).status_code == 400
+    assert (
+        client.get("/auth/v1/user", headers=api(keys, attacker["access_token"])).status_code == 401
+    )
+    r = client.post(
+        "/auth/v1/token?grant_type=refresh_token",
+        headers=api(keys),
+        json={"refresh_token": attacker["refresh_token"]},
+    )
+    assert r.status_code == 401, r.text
+
+
+def test_recover_does_not_reveal_accounts(client, keys):
+    """Unknown and known addresses behave the same, including the per-address limit."""
+    known = f"known-{uuid.uuid4().hex[:10]}@example.com"
+    # Created directly: a sign-up's confirmation mail would already count against the limit.
+    psql(f"insert into auth.users (email, email_confirmed_at) values ('{known}', now())")  # noqa: S608 - test data
+    unknown = f"nobody-{uuid.uuid4().hex[:10]}@example.com"
+    for address in (known, unknown):
+        codes = [
+            client.post("/auth/v1/recover", headers=api(keys), json={"email": address}).status_code
+            for _ in range(6)
+        ]
+        assert codes == [200] * 5 + [429], (address, codes)
 
 
 def test_reset_link(client, keys):

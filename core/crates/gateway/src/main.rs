@@ -13,12 +13,13 @@ mod storage;
 mod tus;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, head, post};
 use axum::{Json, Router};
@@ -31,6 +32,7 @@ struct AppState {
     auth_url: String,
     functions_url: Option<String>,
     graphql_url: Option<String>,
+    trusted_proxies: Vec<config::Cidr>,
     http: proxy::HttpClient,
     storage: storage::Storage,
     realtime: realtime::Hub,
@@ -90,6 +92,7 @@ async fn main() -> ExitCode {
         auth_url: cfg.auth_url,
         functions_url: cfg.functions_url,
         graphql_url: cfg.graphql_url,
+        trusted_proxies: cfg.trusted_proxies,
         http: proxy::client(),
         storage,
         realtime: hub,
@@ -140,6 +143,10 @@ async fn main() -> ExitCode {
         .route("/storage/v1/s3/{*rest}", any(s3::handle))
         .merge(resumable)
         .layer(cors)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            client_address,
+        ))
         .layer(axum::middleware::from_fn(log::access))
         .with_state(state);
 
@@ -187,13 +194,49 @@ async fn rest(State(st): State<Arc<AppState>>, mut req: Request) -> Response {
     proxy::forward(&st.http, &st.postgrest_url, &upstream_path, req).await
 }
 
-/// Auth endpoints only need a valid API key: refresh calls legitimately carry expired access
-/// tokens, and the auth service verifies bearer tokens itself where it needs them.
-async fn auth_service(
+/// Upstream services (auth's rate limits, PostgREST's `request.headers`, functions) see the
+/// client address in `x-forwarded-for` and nothing else a client claimed about itself.
+async fn client_address(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     mut req: Request,
+    next: Next,
 ) -> Response {
+    let forwarded = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok());
+    let ip = client_ip(peer.ip(), forwarded, &st.trusted_proxies);
+    for name in [
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    ] {
+        req.headers_mut().remove(name);
+    }
+    // Overwrite, never append: a client-supplied value would let callers dodge IP rate limits.
+    if let Ok(value) = HeaderValue::from_str(&ip.to_string()) {
+        req.headers_mut().insert("x-forwarded-for", value);
+    }
+    next.run(req).await
+}
+
+/// The peer, unless it is a trusted proxy: then the address it appended to `x-forwarded-for`
+/// (the last one; earlier entries are whatever the client sent).
+fn client_ip(peer: IpAddr, forwarded: Option<&str>, trusted: &[config::Cidr]) -> IpAddr {
+    if !trusted.iter().any(|range| range.contains(peer)) {
+        return peer;
+    }
+    forwarded
+        .and_then(|list| list.rsplit(',').next())
+        .and_then(|last| last.trim().parse().ok())
+        .unwrap_or(peer)
+}
+
+/// Auth endpoints only need a valid API key: refresh calls legitimately carry expired access
+/// tokens, and the auth service verifies bearer tokens itself where it needs them.
+async fn auth_service(State(st): State<Arc<AppState>>, mut req: Request) -> Response {
     // Provider sign-in starts and ends with browser navigations, which cannot carry headers;
     // SAML IdPs return by posting a form to the callback.
     let browser_redirect = matches!(
@@ -205,10 +248,6 @@ async fn auth_service(
         return e.into_response();
     }
     req.headers_mut().remove("apikey");
-    // Overwrite, never append: a client-supplied value would let callers dodge IP rate limits.
-    if let Ok(ip) = HeaderValue::from_str(&peer.ip().to_string()) {
-        req.headers_mut().insert("x-forwarded-for", ip);
-    }
     let path_and_query = req.uri().path_and_query().map_or("/", |p| p.as_str());
     let upstream_path = path_and_query
         .strip_prefix("/auth/v1")
@@ -345,6 +384,40 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use super::client_ip;
+    use crate::config::Cidr;
+    use std::net::IpAddr;
+
+    #[test]
+    fn only_a_trusted_proxy_may_name_the_client() {
+        let proxy: IpAddr = "172.18.0.5".parse().unwrap();
+        let direct: IpAddr = "203.0.113.9".parse().unwrap();
+        let trusted = [
+            Cidr::parse("172.18.0.0/16").unwrap(),
+            Cidr::parse("::1").unwrap(),
+        ];
+        let spoofed = Some("1.2.3.4, 198.51.100.7");
+        // A client's own header is ignored.
+        assert_eq!(client_ip(direct, spoofed, &trusted), direct);
+        assert_eq!(client_ip(direct, spoofed, &[]), direct);
+        // The proxy's appended entry wins over whatever the client prepended.
+        assert_eq!(
+            client_ip(proxy, spoofed, &trusted),
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(client_ip(proxy, Some("garbage"), &trusted), proxy);
+        assert_eq!(client_ip(proxy, None, &trusted), proxy);
+        assert!(Cidr::parse("::1").unwrap().contains("::1".parse().unwrap()));
+        assert!(
+            !Cidr::parse("0.0.0.0/0")
+                .unwrap()
+                .contains("::1".parse().unwrap())
+        );
+        for bad in ["", "proxy", "10.0.0.0/33", "10.0.0.0/x", "::1/129"] {
+            assert!(Cidr::parse(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn function_names_cannot_leave_their_directory() {
         assert!(super::valid_function_name("hello-world_2"));

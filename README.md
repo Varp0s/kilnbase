@@ -130,6 +130,22 @@ tables reachable without RLS (for example after a manual `GRANT`), views that by
 policies for `anon`, `SECURITY DEFINER` functions callable from the API, and public buckets. Exits non-zero on
 anything blocking, so it fits in CI.
 
+### Running behind a proxy
+
+Core speaks plain HTTP on port 8000; in production put a TLS proxy (Caddy, nginx, Traefik) in front of it
+and publish nothing else. Rate limits in auth are per client address, so tell core which peers are proxies,
+otherwise every user shares the proxy's address:
+
+```sh
+KILNBASE_TRUSTED_PROXIES=172.18.0.0/16        # the proxy's address or range; comma-separated
+KILNBASE_CORS_ORIGINS=https://app.example.com  # the browsers allowed to call the API
+KILNBASE_PUBLIC_URL=https://api.example.com    # what links in mails and OAuth callbacks use
+```
+
+Only a trusted peer's `X-Forwarded-For` is believed (its last entry); from anyone else the connection's own
+address is used, and no other forwarding header reaches PostgREST, auth or a function. Studio stays on
+127.0.0.1; reach it through an SSH tunnel.
+
 ### Rotating keys
 
 ```sh

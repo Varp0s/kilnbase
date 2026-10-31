@@ -547,6 +547,8 @@ def create_app(config: Config) -> FastAPI:
                         " returning id",
                         external.email,
                     )
+                else:
+                    await claim_unconfirmed(conn, user_id)
                 await conn.execute(
                     "insert into auth.identities (provider, provider_user_id, user_id, email)"
                     " values ($1, $2, $3, $4)",
@@ -593,10 +595,20 @@ def create_app(config: Config) -> FastAPI:
     def redirect_ok(url: str) -> bool:
         return redirect_allowed(url, [config.public_url, *config.redirect_urls])
 
-    async def send_code(
-        email: str, purpose: str, redirect_to: str | None, create_user: bool, ip: str | None
-    ) -> JSONResponse | None:
-        """Stores a fresh code + link for (email, purpose) and mails them; None on success."""
+    async def claim_unconfirmed(conn, user_id) -> None:
+        """Whoever proved the address now owns the account: an unconfirmed sign-up's password and
+        sessions came from someone who may not, so they go (stops pre-registration takeovers)."""
+        await conn.execute(
+            "with claimed as (update auth.users set password_hash = null, updated_at = now()"
+            " where id = $1 and email_confirmed_at is null and password_hash is not null"
+            " returning id)"
+            " update auth.sessions set revoked_at = now()"
+            " where revoked_at is null and user_id in (select id from claimed)",
+            user_id,
+        )
+
+    def code_limit(email: str, ip: str | None) -> JSONResponse | None:
+        """Counts one code request against the address and the IP; a 429 if either is over."""
         keys = [(otp_email_limiter, f"otp:{email}")]
         if ip is not None:
             keys.append((otp_ip_limiter, ip))
@@ -609,6 +621,14 @@ def create_app(config: Config) -> FastAPI:
                     headers={"Retry-After": str(wait)},
                 )
             limiter.fail(key)
+        return None
+
+    async def send_code(
+        email: str, purpose: str, redirect_to: str | None, create_user: bool, ip: str | None
+    ) -> JSONResponse | None:
+        """Stores a fresh code + link for (email, purpose) and mails them; None on success."""
+        if failed := code_limit(email, ip):
+            return failed
         code = f"{secrets.randbelow(10**6):06d}"
         link = new_secret()
         await app.state.pool.execute(
@@ -705,7 +725,7 @@ def create_app(config: Config) -> FastAPI:
                 "select exists (select 1 from auth.users where lower(email) = $1)", email
             )
             if not exists:
-                return {"sent": True}
+                return code_limit(email, client_ip(request)) or {"sent": True}
         failed = await send_code(
             email, "signin", body.redirect_to, body.create_user, client_ip(request)
         )
@@ -723,7 +743,8 @@ def create_app(config: Config) -> FastAPI:
             "select exists (select 1 from auth.users where lower(email) = $1)", email
         )
         if not exists:
-            return {"sent": True}
+            # Spends the same limiter as a real account, so a 429 cannot reveal one.
+            return code_limit(email, client_ip(request)) or {"sent": True}
         failed = await send_code(email, "recovery", body.redirect_to, False, client_ip(request))
         return failed or {"sent": True}
 
@@ -792,6 +813,9 @@ def create_app(config: Config) -> FastAPI:
                 user_id = await conn.fetchval(
                     "insert into auth.users (email) values ($1) returning id", email
                 )
+            elif purpose != "confirm":
+                # Confirming keeps the sign-up's password: that mail went to the address owner.
+                await claim_unconfirmed(conn, user_id)
             # Receiving the code proves the address.
             await conn.execute(
                 "update auth.users set email_confirmed_at = coalesce(email_confirmed_at, now())"
@@ -989,23 +1013,14 @@ def create_app(config: Config) -> FastAPI:
             if row["password_hash"] and not row["recovery"]:
                 if failed := await check_current_password(row, body.current_password):
                     return failed
+            # Limited before the lookup, so probing addresses costs the same as sending codes.
+            if failed := code_limit(new_email, client_ip(request)):
+                return failed
             taken = await conn.fetchval(
                 "select exists (select 1 from auth.users where lower(email) = $1)", new_email
             )
             if taken:
                 return error(422, "email_taken", "a user with this email already exists")
-            for limiter, key in (
-                (otp_email_limiter, f"otp:{new_email}"),
-                (otp_ip_limiter, client_ip(request)),
-            ):
-                if wait := limiter.retry_after(key):
-                    return error(
-                        429,
-                        "too_many_requests",
-                        "too many codes requested",
-                        headers={"Retry-After": str(wait)},
-                    )
-                limiter.fail(key)
             code = f"{secrets.randbelow(10**6):06d}"
             await conn.execute(
                 "insert into auth.email_changes (user_id, new_email, code_hash)"

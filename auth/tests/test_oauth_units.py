@@ -16,6 +16,9 @@ ALLOWED = ["https://app.example.com", "http://localhost:3000/callback"]
         ("http://localhost:3000/callbackx", False),
         ("javascript:alert(1)", False),
         ("//app.example.com/x", False),
+        # Whitespace survives urlsplit and would land in mail bodies and Location headers.
+        ("https://app.example.com/" + chr(10) + "Visit http://evil.example", False),
+        ("https://app.example.com/" + chr(9) + "x", False),
     ],
 )
 def test_redirect_allow_list(url, ok):

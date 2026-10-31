@@ -330,6 +330,12 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                     let _ = send(&mut sink, expired_message()).await;
                     break;
                 }
+                if !member.within_budget() {
+                    let slow = json!({ "type": "error", "code": "rate_limited",
+                        "message": "too many messages; slow down" });
+                    if !send(&mut sink, slow).await { break }
+                    continue;
+                }
                 let replies = match serde_json::from_str::<ClientMessage>(&text) {
                     Err(_) => vec![json!({ "type": "error", "code": "invalid_message",
                         "message": "unknown or malformed message" })],
@@ -354,7 +360,12 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
                             ClientMessage::Subscribe { id: id.clone(), table: table.clone(), since: None }).await;
                         let mut out = vec![reply.clone()];
                         if reply["type"] == "subscribed" && let Some(since) = since {
-                            out.extend(replay(pool, &caller, &id, &table, since).await);
+                            if member.exhaust_budget() {
+                                out.extend(replay(pool, &caller, &id, &table, since).await);
+                            } else {
+                                out.push(json!({ "type": "error", "id": id, "code": "rate_limited",
+                                    "message": "too many messages; resume again in a second" }));
+                            }
                         }
                         out
                     }
@@ -369,6 +380,10 @@ async fn session(st: Arc<AppState>, caller: Caller, socket: WebSocket) {
             event = channel_events.recv() => {
                 match event {
                     Ok(event) => {
+                        if caller.expired() {
+                            let _ = send(&mut sink, expired_message()).await;
+                            break;
+                        }
                         if let Some(body) = st.channels.deliver(&member, &event)
                             && !send(&mut sink, body).await
                         {

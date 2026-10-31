@@ -162,9 +162,6 @@ impl Channels {
         if !member.joined.contains(channel) {
             return Some(error("not_joined", "join the channel first"));
         }
-        if !member.within_budget() {
-            return Some(error("rate_limited", "too many messages; slow down"));
-        }
         match authorized(pool, caller, member, channel, "broadcast").await {
             Ok(true) => {}
             Ok(false) => return Some(error("forbidden", "not allowed to send on this channel")),
@@ -189,9 +186,6 @@ impl Channels {
     ) -> Option<Value> {
         if !member.joined.contains(channel) {
             return Some(error("not_joined", "join the channel first"));
-        }
-        if !member.within_budget() {
-            return Some(error("rate_limited", "too many messages; slow down"));
         }
         let Some(state) = state else {
             self.untrack(member, channel);
@@ -243,13 +237,23 @@ impl Channels {
 }
 
 impl Member {
-    fn within_budget(&mut self) -> bool {
+    /// Charged once per incoming message of any kind, so joins and subscribes (each a query as
+    /// the caller) cannot be used to hammer the database either.
+    pub fn within_budget(&mut self) -> bool {
         if self.window.elapsed() >= Duration::from_secs(1) {
             self.window = Instant::now();
             self.sent = 0;
         }
         self.sent += 1;
         self.sent <= MAX_MESSAGES_PER_SECOND
+    }
+
+    /// Spends the rest of this second's budget on one expensive message (a replay of up to a
+    /// thousand changes); false when the budget is already used up.
+    pub fn exhaust_budget(&mut self) -> bool {
+        let ok = self.within_budget();
+        self.sent = MAX_MESSAGES_PER_SECOND;
+        ok
     }
 }
 
@@ -277,7 +281,11 @@ async fn authorized(
         .await
         .map_err(db::internal)?
         .get(0);
-    member.allowed.insert((channel.to_owned(), action), ok);
+    // Only grants are cached: a client repeating denied joins would otherwise grow this map
+    // by one entry per made-up channel name.
+    if ok {
+        member.allowed.insert((channel.to_owned(), action), ok);
+    }
     Ok(ok)
 }
 
@@ -291,6 +299,16 @@ mod tests {
         assert!(!valid_channel(""));
         assert!(!valid_channel("a\nb"));
         assert!(!valid_channel(&"x".repeat(256)));
+    }
+
+    #[test]
+    fn a_replay_uses_up_the_budget() {
+        let mut m = Channels::default().member();
+        assert!(m.exhaust_budget());
+        assert!(!m.within_budget());
+        assert!(!m.exhaust_budget());
+        m.window = Instant::now() - Duration::from_secs(1);
+        assert!(m.within_budget());
     }
 
     #[test]
