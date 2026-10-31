@@ -5,6 +5,8 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-31
+
 ### Added
 - **Auth**: phone sign-in with texted 6-digit codes, sent through a signed HTTP hook of your own
   (`KILNBASE_SMS_URL`, `KILNBASE_SMS_SECRET`), so any SMS provider works. Access tokens and the user carry the
@@ -79,6 +81,13 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 ### Fixed
 - **Studio**: the sign-in form no longer stays visible after signing in.
 - **S3 API**: multipart completion bodies are now checked against `x-amz-content-sha256`.
+
+### Known limitations
+- Realtime replays missed changes for up to 10 minutes; longer gaps answer `resync_required`. `DELETE` events
+  carry only the primary key and reach every subscriber of the table.
+- The S3 API has no ACL, tagging or versioning operations; SigV4a (ECDSA) streaming answers `NotImplemented`.
+- Auth rate limits are kept in memory per auth replica.
+- An access token stays valid at the REST API until it expires (at most one hour) after sign-out.
 
 ## [0.8.0] - 2026-10-27
 
