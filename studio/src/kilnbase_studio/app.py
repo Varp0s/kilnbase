@@ -1,4 +1,5 @@
 import hmac
+import io
 import json
 import time
 from contextlib import asynccontextmanager
@@ -17,22 +18,13 @@ from kilnbase_auth.app import MIN_PASSWORD_LENGTH, normalize_email
 from kilnbase_auth.tokens import ACCESS_TOKEN_LIFETIME, user_claims
 from pydantic import BaseModel, Field
 
+from . import auth_admin, platform, schema
+from .common import HEADERS, LEVELS, LOG_FILES, cell, error, read_log
 from .config import Config
 from .rows import COLUMNS_SQL, BadRequest, Table
 
 WEB = Path(__file__).parent / "web"
 NO_SESSION = "00000000-0000-0000-0000-000000000000"
-# Studio shows rows that end users wrote, on a page that holds the service_role key: nothing may
-# run except our own script, and the page may not be framed.
-HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-    ),
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Cache-Control": "no-store",
-}
-
 TABLES_SQL = """
 select c.relname as name, c.relrowsecurity as rls,
        coalesce((select json_agg(json_build_object(
@@ -85,21 +77,12 @@ class ViewAs(BaseModel):
 
 
 SQL_MAX_ROWS = 500
-SQL_MAX_CELL = 10_000
 
 
 class SqlRun(BaseModel):
     query: str = Field(min_length=1, max_length=100_000)
     # Run it, show the result, then roll back: a safe way to try a change.
     rollback: bool = False
-
-
-def cell(value):
-    """JSON-safe, size-capped: timestamps, UUIDs, decimals and the like become their text."""
-    if value is None or isinstance(value, bool | int | float):
-        return value
-    text = value if isinstance(value, str) else str(value)
-    return text if len(text) <= SQL_MAX_CELL else text[:SQL_MAX_CELL] + "…"
 
 
 BUCKETS_SQL = """
@@ -158,33 +141,6 @@ select a.name, a.default_version, a.installed_version, a.comment, n.nspname as s
   left join pg_namespace n on n.oid = e.extnamespace
  order by a.installed_version is null, a.name
 """
-
-
-LOG_DIR = Path("/logs")
-# Fixed names only: a path is never built from the request.
-LOG_FILES = {s: LOG_DIR / s / f"{s}.log" for s in ("core", "auth", "functions", "studio")}
-LOG_TAIL_BYTES = 2 * 1024 * 1024
-LEVELS = ("debug", "info", "warning", "error", "critical")
-
-
-def read_log(path: Path) -> list[dict]:
-    """The last LOG_TAIL_BYTES of the rotated and the current file, oldest first."""
-    entries = []
-    for file in (path.with_name(path.name + ".1"), path):
-        try:
-            with file.open("rb") as f:
-                f.seek(max(0, f.seek(0, 2) - LOG_TAIL_BYTES))
-                data = f.read()
-        except OSError:
-            continue
-        for raw in data.splitlines():
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                continue  # a line cut by the tail offset, or one written mid-rotation
-            if isinstance(entry, dict):
-                entries.append(entry)
-    return entries
 
 
 OVERVIEW_SQL = """
@@ -266,6 +222,24 @@ class NewBucket(BaseModel):
     public: bool = False
 
 
+class BucketSettings(BaseModel):
+    public: bool = False
+    file_size_limit: int | None = Field(default=None, ge=1)
+    allowed_mime_types: list[str] | None = Field(default=None, max_length=100)
+
+
+class SignRequest(BaseModel):
+    # Seconds; core caps it at seven days.
+    expires_in: int = Field(default=3600, ge=1, le=7 * 86400)
+
+
+STORAGE_POLICIES_SQL = """
+select p.policyname as name, p.tablename as table, p.cmd as command, p.roles, p.qual as using,
+       p.with_check as check
+  from pg_policies p where p.schemaname = 'storage' order by p.tablename, p.policyname
+"""
+
+
 class NewUser(BaseModel):
     email: str = Field(max_length=254)
     # None creates a user who signs in with a link, code or provider only.
@@ -276,11 +250,8 @@ class NewUser(BaseModel):
 class RowWrite(BaseModel):
     # The primary key of the row to change or delete; absent for an insert.
     key: dict | None = None
-    values: dict | None = None
-
-
-def error(status: int, code: str, message: str) -> JSONResponse:
-    return JSONResponse({"code": code, "message": message}, status_code=status, headers=HEADERS)
+    # One row's values, or a list of rows for insert-many (CSV import).
+    values: dict | list | None = None
 
 
 class Unauthorized(Exception):
@@ -382,6 +353,47 @@ def create_app(config: Config) -> FastAPI:
         except asyncpg.PostgresError as e:
             return error(400, "database_error", str(e))
         return {"id": body.id}
+
+    @app.post("/api/buckets/{bucket}/update", dependencies=[Depends(admin)])
+    async def update_bucket(bucket: str, body: BucketSettings):
+        done = await app.state.pool.fetchval(
+            "update storage.buckets set public = $2, file_size_limit = $3,"
+            " allowed_mime_types = $4 where id = $1 returning id",
+            bucket,
+            body.public,
+            body.file_size_limit,
+            body.allowed_mime_types,
+        )
+        if done is None:
+            return error(404, "not_found", "no such bucket")
+        return {"ok": True}
+
+    @app.post("/api/buckets/{bucket}/delete", dependencies=[Depends(admin)])
+    async def delete_bucket(bucket: str):
+        """Empty buckets only: objects reference it with `on delete restrict`."""
+        try:
+            done = await app.state.pool.fetchval(
+                "delete from storage.buckets where id = $1 returning id", bucket
+            )
+        except asyncpg.IntegrityConstraintViolationError:
+            return error(409, "conflict", "the bucket still holds files; delete them first")
+        if done is None:
+            return error(404, "not_found", "no such bucket")
+        return {"ok": True}
+
+    @app.get("/api/storage/policies", dependencies=[Depends(admin)])
+    async def storage_policies() -> list[dict]:
+        return [dict(r) for r in await app.state.pool.fetch(STORAGE_POLICIES_SQL)]
+
+    @app.post("/api/buckets/{bucket}/sign", dependencies=[Depends(admin)])
+    async def sign_object(bucket: str, name: str, body: SignRequest):
+        """A signed download URL from core, with the public URL to hand out."""
+        path = f"/storage/v1/object/sign/{quote(bucket, safe='')}/{quote(name, safe='/')}"
+        r = await core("POST", path, json={"expires_in": body.expires_in})
+        if not r.is_success:
+            return relay(r)
+        signed = r.json()
+        return signed | {"public_url": config.public_url + signed["signed_url"]}
 
     @app.get("/api/buckets/{bucket}/objects", dependencies=[Depends(admin)])
     async def objects(bucket: str, prefix: str = "") -> list[dict]:
@@ -707,20 +719,59 @@ def create_app(config: Config) -> FastAPI:
         await conn.execute("set local statement_timeout = '5s'")
 
     @app.get("/api/tables/{name}/rows", dependencies=[Depends(admin)])
-    async def rows(name: str, offset: int = 0, limit: int = 50):
+    async def rows(
+        name: str,
+        offset: int = 0,
+        limit: int = 50,
+        sort: str = "",
+        desc: bool = False,
+        column: str = "",
+        op: str = "eq",
+        value: str = "",
+    ):
+        """One page, optionally sorted and filtered (`column`, `op`, `value`), with the total."""
         if not (0 <= offset and 1 <= limit <= 200):
             return error(400, "invalid_request", "offset >= 0 and 1 <= limit <= 200")
         async with app.state.pool.acquire() as conn, conn.transaction():
             table = await load_table(conn, name)
             if table is None:
                 return error(404, "not_found", "no such table in public")
+            try:
+                select = table.select(table.where(column, op, value), sort, desc)
+                count = table.count(table.where(column, op, value, param=1))
+            except BadRequest as e:
+                return error(400, "invalid_request", str(e))
+            args = [value[:1000]] if column and op != "is" else []
             await as_service_role(conn)
-            fetched = await conn.fetch(table.select(), limit, offset)
+            try:
+                fetched = await conn.fetch(select, limit, offset, *args)
+                total = await conn.fetchval(count, *args)
+            except asyncpg.PostgresError as e:
+                return error(400, "database_error", str(e))
         return {
             "columns": list(table.columns.values()),
             "key": table.key,
             "rows": [json.loads(r["row"]) for r in fetched],
+            "total": total,
         }
+
+    @app.get("/api/tables/{name}/export", dependencies=[Depends(admin)])
+    async def export_rows(name: str):
+        """The first 100 000 rows as CSV, as service_role."""
+        buffer = io.BytesIO()
+        async with app.state.pool.acquire() as conn, conn.transaction():
+            table = await load_table(conn, name)
+            if table is None:
+                return error(404, "not_found", "no such table in public")
+            await as_service_role(conn)
+            await conn.execute("set local statement_timeout = '60s'")
+            await conn.copy_from_query(table.export(), output=buffer, format="csv", header=True)
+        disposition = f'attachment; filename="{quote(name, safe="")}.csv"'
+        return Response(
+            buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": disposition},
+        )
 
     @app.post("/api/tables/{name}/rows", dependencies=[Depends(admin)])
     async def write_row(name: str, body: RowWrite, action: str = "insert"):
@@ -731,17 +782,22 @@ def create_app(config: Config) -> FastAPI:
             try:
                 if action == "insert":
                     sql, args = table.insert(body.values), [json.dumps(body.values)]
+                elif action == "insert-many":
+                    sql, args = table.insert_many(body.values), [json.dumps(body.values)]
                 elif action == "update":
                     sql = table.update(body.key, body.values)
                     args = [json.dumps(body.values), json.dumps(body.key)]
                 elif action == "delete":
                     sql, args = table.delete(body.key), [json.dumps(body.key)]
                 else:
-                    raise BadRequest("action is insert, update or delete")
+                    raise BadRequest("action is insert, insert-many, update or delete")
             except BadRequest as e:
                 return error(400, "invalid_request", str(e))
             await as_service_role(conn)
             try:
+                if action == "insert-many":
+                    status = await conn.execute(sql, *args)
+                    return {"inserted": int(status.rsplit(" ", 1)[-1])}
                 row = await conn.fetchval(sql, *args)
             except asyncpg.PostgresError as e:
                 # The database's own message (constraint, type, permission) is what the admin needs.
@@ -790,6 +846,9 @@ def create_app(config: Config) -> FastAPI:
             "status": status,
             "committed": not body.rollback,
         }
+
+    for module in (schema, auth_admin, platform):
+        app.include_router(module.router(admin, config, core))
 
     app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
     return app

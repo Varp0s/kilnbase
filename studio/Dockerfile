@@ -10,12 +10,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.13 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-# Studio reuses the auth package's token claims and log format (never its key or migrations).
+# Studio reuses the auth package's token claims and log format (never its key or migrations)
+# and the CLI's database audit (Advisors).
 COPY auth ./auth
+COPY cli ./cli
 COPY studio ./studio
 COPY --from=web /out ./studio/src/kilnbase_studio/web
 # uv needs every workspace member's manifest to validate the lock file.
-COPY cli/pyproject.toml ./cli/pyproject.toml
 COPY functions-runner/pyproject.toml ./functions-runner/pyproject.toml
 RUN uv sync --locked --no-dev --package kilnbase-studio \
     && useradd --system --uid 10001 kilnbase \

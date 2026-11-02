@@ -8,6 +8,7 @@ dependencies = [
     "asyncpg==0.32.0",
     "fastapi==0.162.0",
     "httpx2==2.16.0",
+    "kilnbase",
     "kilnbase-auth",
     "pyjwt[crypto]==2.15.1",
     "uvicorn[standard]==0.54.0",
@@ -16,6 +17,8 @@ dependencies = [
 [tool.uv.sources]
 # Shares the access-token claims and the log format with the auth service, never its key.
 kilnbase-auth = { workspace = true }
+# The Advisors page runs `kilnbase doctor`'s database audit.
+kilnbase = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.9,<1"]

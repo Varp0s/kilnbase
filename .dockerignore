@@ -4,6 +4,7 @@
 !auth/pyproject.toml
 !auth/src/
 !cli/pyproject.toml
+!cli/src/
 !migrations/
 !studio/pyproject.toml
 !functions-runner/pyproject.toml

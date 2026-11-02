@@ -96,28 +96,71 @@ COMPOSE_PROFILES=studio docker compose up -d   # then open http://127.0.0.1:3001
 Sign in with `KILNBASE_SERVICE_ROLE_KEY` (kept in that browser tab only). Studio listens on `127.0.0.1` only;
 use an SSH tunnel to reach it from another machine.
 
+Press Ctrl+K (⌘K) to jump to a page by name. Every schema change Studio makes shows the exact SQL first and runs
+it only after you confirm; nothing it runs is recorded in `db/migrations`, so copy statements you want to keep into
+a migration (`kilnbase migrate new <name>`).
+
+Database
+
 - **Overview**: counts and health checks (tables without RLS, failed webhook deliveries, recent errors).
-- **Tables & policies**: every `public` table with its RLS state and policies; "Enable RLS" and "Add policy"
-  open the SQL editor with a statement to review and run.
-- **Table editor**: browse rows; insert, edit and delete rows of tables with a primary key (as service_role).
-- **SQL**: run SQL as the database superuser in one transaction, optionally rolled back afterwards. Schema
-  changes made here are not recorded in `db/migrations`; use `kilnbase migrate new` for ones you keep.
-- **Storage**: create buckets, browse files by folder, upload, download and delete.
-- **Database**: version, size, connections; enable and disable extensions (relocatable ones go to `extensions`).
+- **Table editor**: browse rows with a filter and sort; insert, edit and delete rows of tables with a primary key
+  (as service_role); import and export CSV; create tables, add and drop columns, drop tables.
+- **SQL editor**: run SQL as the database superuser in one transaction, optionally rolled back afterwards; EXPLAIN;
+  export the result as CSV; templates, history and saved queries (kept in that browser).
+- **Schema**: tables, functions, triggers, indexes, enum types, views, foreign keys and roles, with their definitions
+  and drop / enable / disable actions.
+- **Policies**: every `public` table with its RLS state and policies; enable or disable RLS; a policy builder with
+  templates (own rows, public read, verified email…) that writes the `create policy` for you; drop policies.
+- **Performance**: running queries (cancel or terminate), the most expensive statements (pg_stat_statements) and
+  per-table scan and dead-row counts.
+- **Advisors**: the database checks of `kilnbase doctor` (tables reachable without RLS, views and functions that
+  bypass it, unconditional write policies, public buckets) plus performance findings (unindexed foreign keys,
+  unused indexes, tables without a primary key, bloat).
+- **Migrations**: the platform and project migrations this database has.
+- **Extensions**: version, size, connections; enable and disable extensions (relocatable ones go to `extensions`).
+
+Auth
+
+- **Users**: search, create, confirm email, end all sessions, delete. A user's page shows their identities, MFA
+  factors (removable when an authenticator is lost) and sessions (revocable one by one), and sends a password-reset
+  or magic-link mail through the normal auth API.
+- **Sessions**: every active session, with its assurance level and last refresh; revoke any.
 - **View as user**: runs a query with that user's role and the claims their access token carries, so you see
   exactly the rows the REST API returns to them, without signing in as them (rolled back, nothing is written).
-- **Users**: search, create, confirm email, end all sessions, delete.
-- **Connect**: the API URL, the anon key and client snippets.
+- **Auth settings**: what the running auth service offers (providers, email, phone, anonymous sign-in, MFA,
+  redirect URLs, limits), as read from `GET /auth/v1/settings`.
+
+Platform
+
+- **Storage**: create buckets and change their settings (public, size limit, MIME types); browse files by folder;
+  upload, download, delete; copy a public or signed URL; delete empty buckets; storage policies with the same builder.
+- **Functions**: the functions in `./functions` (mounted read-only) with their source, and a test call as a visitor
+  or as a server, through core like any client. Needs `COMPOSE_PROFILES=functions`.
+- **Realtime**: which tables publish changes (enable and disable), the channel authorisation function, and an
+  inspector that shows a table's changes and a channel's messages live, plus a broadcast sender.
 - **Webhooks**: create (the signing secret is shown once), enable, disable and delete webhooks; the newest
   deliveries with status and last error, and a retry for failed ones.
 - **Queues**: create, purge and delete pgmq queues, send a JSON message, and peek at the oldest 50 messages
   (peeking neither hides them nor counts as a read).
 - **Cron jobs**: schedule SQL with pg_cron (enabled from the page if it is not yet), enable, disable and delete
   jobs, and see the newest runs with their status and message. Jobs created here run as the database superuser.
+- **GraphQL**: a query editor against `/graphql/v1` (needs `COMPOSE_PROFILES=graphql`).
 
+Observe
+
+- **Reports**: requests per hour by status class, requests and latency (p50, p95) per service, sign-ups and
+  sign-ins per day, storage per bucket and the largest tables.
 - **Logs**: the JSON log lines of core, auth, functions and Studio, filtered by service, level and text. Each
   service writes to its own volume (10 MB, one rotation) and Studio mounts them read-only; Postgres, PostgREST
   and imgproxy log to stderr only (`docker compose logs`).
+
+Project
+
+- **API docs**: for each table, its columns and ready-to-paste JavaScript, Python and curl calls with your URL and
+  anon key; plus auth, storage and realtime snippets.
+- **Connect**: the API URL, the anon key and client snippets.
+- **Settings**: keys and JWT details, database connection details and server settings, service health, backup
+  and point-in-time-recovery status with the commands to run, log sizes.
 
 ### Security check
 

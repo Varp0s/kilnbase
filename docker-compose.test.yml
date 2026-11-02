@@ -63,6 +63,12 @@ services:
 
   studio:
     profiles: !reset []
+    volumes: !override
+      - logs-studio:/logs/studio
+      - logs-core:/logs/core:ro
+      - logs-auth:/logs/auth:ro
+      - logs-functions:/logs/functions:ro
+      - ./tests/functions:/functions:ro
 
   functions:
     profiles: !reset []

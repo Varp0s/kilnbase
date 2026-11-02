@@ -18,6 +18,10 @@ select a.attname as name, format_type(a.atttypid, a.atttypmod) as type,
 """
 
 
+# Filter operators of the table editor; `like` is a case-insensitive "contains".
+OPS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "like": "", "is": ""}
+
+
 class BadRequest(Exception):
     pass
 
@@ -55,12 +59,41 @@ class Table:
             f" from json_populate_record(null::{self.relation}, ${param}::json))"
         )
 
-    def select(self) -> str:
+    def where(self, column: str, op: str, value: str, param: int = 3) -> str:
+        """A WHERE clause whose value is parameter `param`; '' when unfiltered."""
+        if not column:
+            return ""
+        if column not in self.columns:
+            raise BadRequest(f"no column {column!r}")
+        if op not in OPS:
+            raise BadRequest(f"op is one of {', '.join(OPS)}")
+        name = ident(column)
+        if op == "is":
+            if value not in ("null", "not null"):
+                raise BadRequest("`is` takes null or not null")
+            return f" where {name} is {value}"
+        if op == "like":
+            return f" where {name}::text ilike '%' || ${param} || '%'"
+        # The value travels as text and Postgres parses it with the column's own type (format_type).
+        return f" where {name} {OPS[op]} ${param}::text::{self.columns[column]['type']}"
+
+    def select(self, where: str = "", sort: str = "", desc: bool = False) -> str:
+        if sort and sort not in self.columns:
+            raise BadRequest(f"no column {sort!r}")
         order = ", ".join(ident(k) for k in self.key) or "ctid"
+        if sort:
+            order = f"{ident(sort)} {'desc' if desc else 'asc'} nulls last, {order}"
         return (
             f"select to_json(t)::text as row from {self.relation} t"  # noqa: S608
-            f" order by {order} limit $1 offset $2"
+            f"{where} order by {order} limit $1 offset $2"
         )
+
+    def count(self, where: str = "") -> str:
+        return f"select count(*) from {self.relation} t{where}"  # noqa: S608
+
+    def export(self) -> str:
+        order = ", ".join(ident(k) for k in self.key) or "ctid"
+        return f"select * from {self.relation} order by {order} limit 100000"  # noqa: S608
 
     def insert(self, values: dict) -> str:
         cols = ", ".join(ident(c) for c in self._writable(values))
@@ -68,6 +101,19 @@ class Table:
             f"insert into {self.relation} as t ({cols})"  # noqa: S608
             f" select {cols} from json_populate_record(null::{self.relation}, $1::json)"
             " returning to_json(t)::text"
+        )
+
+    def insert_many(self, rows: list) -> str:
+        """Columns are the union of the rows' keys; a key a row lacks becomes NULL, not default."""
+        if not isinstance(rows, list) or not rows or len(rows) > 1000:
+            raise BadRequest("give a list of 1 to 1000 rows")
+        names: list[str] = []
+        for row in rows:
+            names += [n for n in self._writable(row) if n not in names]
+        cols = ", ".join(ident(c) for c in names)
+        return (
+            f"insert into {self.relation} ({cols})"  # noqa: S608
+            f" select {cols} from json_populate_recordset(null::{self.relation}, $1::json)"
         )
 
     def update(self, key: dict, values: dict) -> str:

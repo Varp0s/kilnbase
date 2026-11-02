@@ -5,6 +5,34 @@ until 1.0, minor releases may contain breaking changes, always called out below.
 
 ## [Unreleased]
 
+### Added
+- **Studio**: the table editor filters and sorts rows, shows the total, imports and exports CSV, and creates
+  tables, adds and drops columns and drops tables. Every schema change shows its SQL first and runs on confirmation.
+- **Studio**: SQL editor with EXPLAIN, CSV export of the result, templates, history and saved queries (kept in the
+  browser).
+- **Studio**: Schema page (tables, functions, triggers, indexes, enum types, views, foreign keys, roles) with
+  definitions and drop / enable / disable actions; Migrations page.
+- **Studio**: policy builder with templates on the Policies and Storage pages; enable or disable RLS and drop
+  policies from the page.
+- **Studio**: Performance page (running queries with cancel / terminate, pg_stat_statements, table statistics) and
+  Advisors page (the database checks of `kilnbase doctor` plus unindexed foreign keys, unused indexes, tables
+  without a primary key, bloat).
+- **Studio**: user detail page (identities, MFA factors, sessions; send password-reset or magic-link mails; remove
+  a lost authenticator), Sessions page, Auth settings page.
+- **Auth**: `GET /auth/v1/settings` lists the sign-in methods the project offers (providers, email, phone,
+  anonymous sign-in, MFA, redirect URLs, limits); no secrets.
+- **Studio**: bucket settings (public, size limit, MIME types), bucket deletion, public and signed URL copying,
+  storage policies.
+- **Studio**: Functions page (source of each function in `./functions`, now mounted read-only into Studio; test
+  calls as a visitor or a server), Realtime page (enable tables, edit channel authorisation, live inspector of a
+  table and a channel, broadcast sender), GraphQL editor, API docs per table, Reports (requests per hour and per
+  service with p50/p95 latency, sign-ups and sign-ins per day, storage and table sizes), Settings (keys, JWT,
+  database, service health, backup and PITR status).
+- **Studio**: Ctrl+K jumps to a page; pages have addresses (`#data/todos`, `#schema/functions`, `#user/<id>`).
+
+### Changed
+- **Studio**: the Docker image now includes the CLI package, whose database audit powers the Advisors page.
+
 ## [0.9.0] - 2026-10-31
 
 ### Added

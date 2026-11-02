@@ -32,27 +32,45 @@
       <nav id="nav" aria-label="Studio">
         <button type="button" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Overview</button>
         <p class="nav-group">Database</p>
-        <button type="button" data-view="tables"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Tables &amp; policies</button>
         <button type="button" data-view="data"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>Table editor</button>
-        <button type="button" data-view="sql"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 15h4"/></svg>SQL</button>
-        <button type="button" data-view="database"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Database</button>
+        <button type="button" data-view="sql"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 10l3 2-3 2M13 15h4"/></svg>SQL editor</button>
+        <button type="button" data-view="schema"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 14h6v6h-6zM14 4h6v6h-6zM4 14h6v6H4z"/></svg>Schema</button>
+        <button type="button" data-view="tables"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>Policies</button>
+        <button type="button" data-view="performance"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M6 16v-5M11 16V7M16 16v-3M21 16V4"/></svg>Performance</button>
+        <button type="button" data-view="advisors"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18h.01"/></svg>Advisors</button>
+        <button type="button" data-view="migrations"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h11M4 12h16M4 17h11"/><path d="M17 4l3 3-3 3M17 14l3 3-3 3"/></svg>Migrations</button>
+        <button type="button" data-view="database"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Extensions</button>
         <p class="nav-group">Auth</p>
         <button type="button" data-view="users"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 20v-1a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v1M16 3.5a4 4 0 0 1 0 8M22 20v-1a5 5 0 0 0-3.5-4.8"/></svg>Users</button>
+        <button type="button" data-view="sessions"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Sessions</button>
         <button type="button" data-view="viewas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>View as user</button>
+        <button type="button" data-view="authsettings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.5 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.5-2-1.5c.1-.4.1-.8.1-1.2z"/></svg>Auth settings</button>
         <p class="nav-group">Platform</p>
         <button type="button" data-view="storage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Storage</button>
+        <button type="button" data-view="functions"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l-4 4 4 4M16 8l4 4-4 4M14 4l-4 16"/></svg>Functions</button>
+        <button type="button" data-view="realtime"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12h.01M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>Realtime</button>
         <button type="button" data-view="webhooks"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Webhooks</button>
         <button type="button" data-view="queues"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M3 13h5l1 3h6l1-3h5"/></svg>Queues</button>
         <button type="button" data-view="cron"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Cron jobs</button>
+        <button type="button" data-view="graphql"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l16 9M20 7.5l-16 9M12 3v18"/></svg>GraphQL</button>
+        <p class="nav-group">Observe</p>
+        <button type="button" data-view="reports"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M5 15l4-4 4 3 6-7"/></svg>Reports</button>
         <button type="button" data-view="logs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg>Logs</button>
+        <p class="nav-group">Project</p>
+        <button type="button" data-view="apidocs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h12l4 4v12H4z"/><path d="M8 12h8M8 16h5"/></svg>API docs</button>
         <button type="button" data-view="connect"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/></svg>Connect</button>
+        <button type="button" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.5-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.5 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.5-2-1.5c.1-.4.1-.8.1-1.2z"/></svg>Settings</button>
       </nav>
       <button type="button" id="signout" class="signout"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg>Sign out</button>
     </aside>
     <main>
       <header class="topbar">
-        <h1 id="page-title">Studio</h1>
-        <p id="page-sub" class="hint"></p>
+        <div>
+          <h1 id="page-title">Studio</h1>
+          <p id="page-sub" class="hint"></p>
+        </div>
+        <input id="palette" list="pages" placeholder="Jump to… (Ctrl+K)" autocomplete="off" aria-label="Jump to a page">
+        <datalist id="pages"><option value="overview">Overview</option><option value="data">Table editor</option><option value="sql">SQL editor</option><option value="schema">Schema</option><option value="tables">Policies</option><option value="performance">Performance</option><option value="advisors">Advisors</option><option value="migrations">Migrations</option><option value="database">Extensions</option><option value="users">Users</option><option value="sessions">Sessions</option><option value="viewas">View as user</option><option value="authsettings">Auth settings</option><option value="storage">Storage</option><option value="functions">Functions</option><option value="realtime">Realtime</option><option value="webhooks">Webhooks</option><option value="queues">Queues</option><option value="cron">Cron jobs</option><option value="graphql">GraphQL</option><option value="reports">Reports</option><option value="logs">Logs</option><option value="apidocs">API docs</option><option value="connect">Connect</option><option value="settings">Settings</option></datalist>
       </header>
       <section id="view" aria-live="polite"></section>
     </main>

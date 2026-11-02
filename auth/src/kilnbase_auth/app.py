@@ -263,6 +263,22 @@ def create_app(config: Config) -> FastAPI:
     async def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/settings")
+    async def settings() -> dict:
+        """The sign-in methods this project offers; no secrets. Shown by Studio, usable by apps."""
+        return {
+            "providers": sorted(config.providers or {}),
+            "saml_providers": sorted(config.identity_providers or {}),
+            "email": config.smtp_url is not None,
+            "phone": config.sms_url is not None,
+            "anonymous_sign_in": config.anonymous_sign_in,
+            "mfa_required": config.mfa_required,
+            "redirect_urls": list(config.redirect_urls),
+            "mails_per_ip_hour": config.mails_per_ip_hour,
+            "min_password_length": MIN_PASSWORD_LENGTH,
+            "access_token_lifetime": ACCESS_TOKEN_LIFETIME,
+        }
+
     @app.post("/signup")
     async def signup(body: Credentials, request: Request):
         email = normalize_email(body.email)

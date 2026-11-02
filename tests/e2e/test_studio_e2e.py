@@ -421,3 +421,246 @@ def test_overview_counts(keys):
         info["recent_errors"]
     )
     assert httpx.get(f"{STUDIO}/api/overview").status_code == 401
+
+
+def test_table_editor_filters_sorts_counts_and_exports(keys):
+    h = admin(keys)
+    rows = [{"id": i, "verified_only": i % 2 == 0} for i in range(200, 205)]
+    r = edit(keys, "insert-many", values=rows)
+    assert r.status_code == 200 and r.json() == {"inserted": 5}, r.text
+    try:
+
+        def page(**params):
+            r = httpx.get(f"{STUDIO}/api/tables/e2e_studio/rows", params=params, headers=h)
+            assert r.status_code == 200, r.text
+            return r.json()
+
+        p = page(column="id", op="gte", value="202")
+        assert p["total"] == 3 and [x["id"] for x in p["rows"]] == [202, 203, 204]
+        p = page(column="id", op="gte", value="202", sort="id", desc="true")
+        assert [x["id"] for x in p["rows"]] == [204, 203, 202]
+        p = page(column="verified_only", op="eq", value="true", sort="id")
+        assert {x["id"] for x in p["rows"]} >= {200, 202, 204}
+        assert page(column="owner", op="is", value="null")["total"] >= 5
+        assert page(column="id", op="like", value="20")["total"] >= 5
+        bad = httpx.get(
+            f"{STUDIO}/api/tables/e2e_studio/rows", params={"column": "nope"}, headers=h
+        )
+        assert bad.status_code == 400 and bad.json()["code"] == "invalid_request"
+        bad = httpx.get(
+            f"{STUDIO}/api/tables/e2e_studio/rows",
+            params={"column": "id", "op": "eq", "value": "x"},
+            headers=h,
+        )
+        assert bad.status_code == 400 and bad.json()["code"] == "database_error"
+
+        csv = httpx.get(f"{STUDIO}/api/tables/e2e_studio/export", headers=h)
+        assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
+        lines = csv.text.splitlines()
+        assert lines[0] == "id,owner,verified_only" and "203,,f" in lines
+        assert httpx.get(f"{STUDIO}/api/tables/e2e_studio/export").status_code == 401
+    finally:
+        for i in range(200, 205):
+            edit(keys, "delete", key={"id": i})
+
+
+def test_schema_advisors_performance_and_migrations(keys):
+    h = admin(keys)
+    schema = httpx.get(f"{STUDIO}/api/schema", headers=h).json()
+    assert set(schema) == {
+        "tables",
+        "functions",
+        "triggers",
+        "indexes",
+        "enums",
+        "views",
+        "roles",
+        "foreign_keys",
+    }
+    table = next(t for t in schema["tables"] if t["name"] == "e2e_studio")
+    assert table["rls"] and table["has_key"] and isinstance(table["bytes"], int)
+    assert any(i["table"] == "e2e_studio" and i["primary"] for i in schema["indexes"])
+    assert {"anon", "authenticated", "service_role"} <= {r["name"] for r in schema["roles"]}
+
+    advisors = httpx.get(f"{STUDIO}/api/advisors", headers=h).json()
+    assert set(advisors) == {"security", "performance"}
+    assert all(f["level"] in ("fail", "warn", "info") for f in advisors["security"])
+
+    perf = httpx.get(f"{STUDIO}/api/performance", headers=h).json()
+    assert isinstance(perf["activity"], list) and isinstance(perf["statements_enabled"], bool)
+    assert any(t["name"] == "e2e_studio" for t in perf["tables"])
+    assert httpx.post(f"{STUDIO}/api/performance/0/cancel", headers=h).status_code == 404
+    assert httpx.post(f"{STUDIO}/api/performance/0/kill", headers=h).status_code == 400
+
+    migrations = httpx.get(f"{STUDIO}/api/migrations", headers=h).json()
+    assert migrations["platform"] and isinstance(migrations["app"], list)
+    assert httpx.get(f"{STUDIO}/api/schema").status_code == 401
+
+
+def test_user_detail_sessions_and_mails(client, keys):
+    h = admin(keys)
+    session = sign_up(client, keys)
+    user_id, email = session["user"]["id"], session["user"]["email"]
+    detail = httpx.get(f"{STUDIO}/api/users/{user_id}", headers=h).json()
+    assert detail["email"] == email and detail["has_password"] is True
+    assert "password_hash" not in detail and detail["identities"] == [] and detail["factors"] == []
+    assert len(detail["sessions"]) == 1 and detail["sessions"][0]["revoked_at"] is None
+
+    sessions = httpx.get(f"{STUDIO}/api/sessions", params={"search": email}, headers=h).json()
+    assert [s["user_id"] for s in sessions] == [user_id] and "token" not in json.dumps(sessions)
+    sid = sessions[0]["id"]
+    assert httpx.post(f"{STUDIO}/api/sessions/{sid}/revoke", headers=h).status_code == 200
+    assert httpx.post(f"{STUDIO}/api/sessions/{sid}/revoke", headers=h).status_code == 404
+    refresh = client.post(
+        "/auth/v1/token?grant_type=refresh_token",
+        headers={"apikey": keys.anon},
+        json={"refresh_token": session["refresh_token"]},
+    )
+    assert refresh.status_code == 401, refresh.text
+
+    r = httpx.post(f"{STUDIO}/api/users/{user_id}/send/magic-link", headers=h)
+    assert r.status_code == 200 and r.json() == {"sent": True}, r.text
+    assert httpx.post(f"{STUDIO}/api/users/{user_id}/send/sms", headers=h).status_code == 400
+    missing = uuid.uuid4()
+    assert httpx.get(f"{STUDIO}/api/users/{missing}", headers=h).status_code == 404
+    assert httpx.post(f"{STUDIO}/api/users/{missing}/send/recover", headers=h).status_code == 404
+    assert httpx.get(f"{STUDIO}/api/users/{user_id}").status_code == 401
+
+
+def test_auth_settings_are_public_and_secret_free(client, keys):
+    direct = client.get("/auth/v1/settings", headers={"apikey": keys.anon})
+    assert direct.status_code == 200, direct.text
+    via_studio = httpx.get(f"{STUDIO}/api/auth/settings", headers=admin(keys))
+    assert via_studio.status_code == 200 and via_studio.json() == direct.json()
+    settings = direct.json()
+    assert settings["min_password_length"] == 8 and settings["email"] is True
+    assert isinstance(settings["providers"], list) and isinstance(settings["redirect_urls"], list)
+    assert not any(k in json.dumps(settings).lower() for k in ("secret", "smtp://", "client_"))
+
+
+def test_bucket_settings_signed_urls_and_policies(client, keys):
+    h = admin(keys)
+    bucket = f"studio-{uuid.uuid4().hex[:8]}"
+    assert httpx.post(f"{STUDIO}/api/buckets", headers=h, json={"id": bucket}).status_code == 200
+    base = f"{STUDIO}/api/buckets/{bucket}"
+    settings = {"public": False, "file_size_limit": 1000, "allowed_mime_types": ["text/plain"]}
+    assert httpx.post(f"{base}/update", headers=h, json=settings).status_code == 200
+    info = next(
+        b for b in httpx.get(f"{STUDIO}/api/buckets", headers=h).json() if b["id"] == bucket
+    )
+    assert info["file_size_limit"] == 1000 and info["allowed_mime_types"] == ["text/plain"]
+
+    r = httpx.post(
+        f"{base}/object",
+        params={"name": "a.txt"},
+        headers=h | {"Content-Type": "text/plain"},
+        content=b"hi",
+    )
+    assert r.status_code < 300, r.text
+    signed = httpx.post(
+        f"{base}/sign", params={"name": "a.txt"}, headers=h, json={"expires_in": 60}
+    )
+    assert signed.status_code == 200, signed.text
+    assert signed.json()["public_url"].startswith("http://localhost:8000/storage/v1/object/sign/")
+    assert client.get(signed.json()["signed_url"]).content == b"hi"
+
+    assert httpx.post(f"{base}/delete", headers=h).status_code == 409
+    assert (
+        httpx.post(f"{base}/object/delete", params={"name": "a.txt"}, headers=h).status_code < 300
+    )
+    assert httpx.post(f"{base}/delete", headers=h).status_code == 200
+    assert httpx.post(f"{base}/delete", headers=h).status_code == 404
+    assert httpx.post(f"{base}/update", headers=h, json=settings).status_code == 404
+    policies = httpx.get(f"{STUDIO}/api/storage/policies", headers=h).json()
+    assert isinstance(policies, list) and all(p["table"] == "objects" for p in policies)
+
+
+def test_functions_page_lists_and_invokes(keys):
+    h = admin(keys)
+    info = httpx.get(f"{STUDIO}/api/functions", headers=h).json()
+    assert info["mounted"] and "whoami" in {f["name"] for f in info["functions"]}
+    whoami = next(f for f in info["functions"] if f["name"] == "whoami")
+    assert whoami["language"] == "python" and whoami["entry"] == "main.py"
+    source = httpx.get(f"{STUDIO}/api/functions/whoami/source", headers=h).json()
+    assert "def handler" in source["source"] and source["file"] == "main.py"
+    assert (
+        httpx.get(
+            f"{STUDIO}/api/functions/whoami/source", params={"file": "../x"}, headers=h
+        ).status_code
+        == 400
+    )
+    assert httpx.get(f"{STUDIO}/api/functions/nope/source", headers=h).status_code == 404
+
+    call = {"method": "POST", "body": "ping", "caller": "service_role", "headers": {"X-Test": "1"}}
+    r = httpx.post(f"{STUDIO}/api/functions/whoami/invoke", headers=h, json=call, timeout=30)
+    assert r.status_code == 200, r.text
+    result = r.json()
+    assert result["status"] == 201 and result["ms"] >= 0
+    assert json.loads(result["body"]) == {"role": "service_role", "sub": None, "echo": "ping"}
+    anon = httpx.post(
+        f"{STUDIO}/api/functions/whoami/invoke", headers=h, json={"body": ""}, timeout=30
+    )
+    assert json.loads(anon.json()["body"])["role"] == "anon"
+    assert httpx.post(f"{STUDIO}/api/functions/Nope/invoke", headers=h, json={}).status_code == 404
+
+
+def test_realtime_page_inspector_and_broadcast(keys):
+    h = admin(keys)
+    psql("select kilnbase.enable_realtime('public.e2e_studio');")
+    try:
+        info = httpx.get(f"{STUDIO}/api/realtime", headers=h).json()
+        table = next(t for t in info["tables"] if t["name"] == "e2e_studio")
+        assert table["enabled"] and "realtime.authorize" in info["authorize"]
+
+        seen = {}
+        params = {"table": "e2e_studio", "channel": "room:e2e"}
+        with httpx.stream(
+            "GET", f"{STUDIO}/api/realtime/listen", params=params, headers=h, timeout=20
+        ) as r:
+            assert r.status_code == 200 and r.headers["content-type"].startswith(
+                "text/event-stream"
+            )
+            for line in r.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                event = json.loads(line[6:])
+                seen[event["type"]] = event
+                if event["type"] == "subscribed":
+                    psql("insert into public.e2e_studio (id, owner) values (777, null);")
+                if event["type"] == "joined":
+                    body = {"channel": "room:e2e", "event": "ping", "payload": {"n": 1}}
+                    sent = httpx.post(f"{STUDIO}/api/realtime/broadcast", headers=h, json=body)
+                    assert sent.status_code == 200, sent.text
+                if "change" in seen and "broadcast" in seen:
+                    break
+        assert seen["change"]["op"] == "INSERT" and seen["change"]["record"]["id"] == 777
+        assert seen["broadcast"]["event"] == "ping" and seen["broadcast"]["payload"] == {"n": 1}
+        assert httpx.get(f"{STUDIO}/api/realtime/listen", headers=h).status_code == 400
+        assert (
+            httpx.get(
+                f"{STUDIO}/api/realtime/listen", params={"table": "x; drop"}, headers=h
+            ).status_code
+            == 400
+        )
+    finally:
+        psql("delete from public.e2e_studio where id = 777;")
+        psql("select kilnbase.disable_realtime('public.e2e_studio');")
+
+
+def test_graphql_reports_and_settings(keys):
+    h = admin(keys)
+    r = httpx.post(f"{STUDIO}/api/graphql", headers=h, json={"query": "{ __typename }"})
+    assert r.status_code == 200 and r.json()["data"] == {"__typename": "Query"}, r.text
+    assert httpx.post(f"{STUDIO}/api/graphql", headers=h, json={"query": ""}).status_code == 422
+
+    report = httpx.get(f"{STUDIO}/api/reports", headers=h).json()
+    assert len(report["hours"]) == 25 and len(report["days"]) == 14
+    assert isinstance(report["services"], list) and isinstance(report["buckets"], list)
+
+    settings = httpx.get(f"{STUDIO}/api/settings", headers=h).json()
+    assert settings["anon_key"] == keys.anon and settings["public_url"] == "http://localhost:8000"
+    assert settings["database"]["user"] == "postgres" and settings["jwt"]["alg"] == "ES256"
+    assert settings["services"]["core"] and settings["services"]["auth"]
+    assert "password" not in json.dumps(settings).lower().replace("password_", "")
+    assert keys.service_role not in json.dumps(settings)
+    assert httpx.get(f"{STUDIO}/api/settings").status_code == 401

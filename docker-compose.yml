@@ -190,6 +190,8 @@ services:
       - logs-core:/logs/core:ro
       - logs-auth:/logs/auth:ro
       - logs-functions:/logs/functions:ro
+      # The Functions page lists and shows the project's functions; calls go through core.
+      - ./functions:/functions:ro
     ports:
       - "127.0.0.1:3001:3001"
     read_only: true

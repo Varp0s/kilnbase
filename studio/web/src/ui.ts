@@ -31,14 +31,15 @@ export function loadFont(): void {
 /** A modal yes/no question. Resolves false on Cancel, Escape or a click outside. */
 export function confirmDialog(
   title: string,
-  body: string,
+  body: string | Node,
   { confirmLabel = "Confirm", danger = false }: { confirmLabel?: string; danger?: boolean } = {},
 ): Promise<boolean> {
   return new Promise((resolve) => {
     const cancel = h("button", { type: "button" }, "Cancel");
     const ok = h("button", { type: "button", className: danger ? "solid-danger" : "solid" }, confirmLabel);
-    const dialog = h("dialog", { className: "dialog" },
-      h("h2", {}, title), h("p", {}, body), h("div", { className: "dialog-actions" }, cancel, ok));
+    const dialog = h("dialog", { className: typeof body === "string" ? "dialog" : "dialog wide" },
+      h("h2", {}, title), typeof body === "string" ? h("p", {}, body) : body,
+      h("div", { className: "dialog-actions" }, cancel, ok));
     const close = (answer: boolean) => { dialog.close(); dialog.remove(); resolve(answer); };
     cancel.addEventListener("click", () => close(false));
     ok.addEventListener("click", () => close(true));
